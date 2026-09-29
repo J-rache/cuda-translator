@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+.toolchain/
+*.exe
+*.cubin
+*.fatbin
+build/
+dist/
+*.egg-info/
+.venv/
