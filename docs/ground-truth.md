@@ -157,3 +157,11 @@ all floating comparisons had max absolute difference 0.0.
 Full failure-to-proof history, hardware details and the narrow signed
 `ld.s8` / `setp.s16` bug found by the differential run are recorded in
 [house-field-crossvendor-20260929.md](house-field-crossvendor-20260929.md).
+
+Scale follow-up on the same AMD device preserved byte identity at 128 nodes
+(degree 8, 6,144 B dynamic shared) and 256 nodes (degree 12, 12,288 B dynamic
+shared). A 384-node / degree-14 CUDA capture requires a 384-thread work-group;
+the AMD device and compiled OpenCL kernel both report a 256-work-item maximum,
+so the runner rejects that launch before execution with an explicit
+capability error. This boundary and the canonical kernel work-group constants
+are recorded in the cross-vendor receipt.

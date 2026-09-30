@@ -22,7 +22,12 @@ CL_SUCCESS = 0
 CL_PLATFORM_NOT_FOUND_KHR = -1001
 CL_MEM_READ_WRITE = 0x1
 CL_MEM_COPY_HOST_PTR = 0x10
-CL_KERNEL_COMPILE_WORK_GROUP_SIZE = 0x11B4
+# Canonical clGetKernelWorkGroupInfo constants:
+CL_KERNEL_WORK_GROUP_SIZE = 0x11B0
+CL_KERNEL_COMPILE_WORK_GROUP_SIZE = 0x11B1
+CL_KERNEL_LOCAL_MEM_SIZE = 0x11B2
+CL_KERNEL_PREFERRED_WORK_GROUP_SIZE_MULTIPLE = 0x11B3
+CL_KERNEL_PRIVATE_MEM_SIZE = 0x11B4
 CL_PROGRAM_BUILD_LOG = 0x1183
 # Canonical Khronos constants (cl_platform.h):
 CL_PLATFORM_PROFILE = 0x0900
@@ -88,6 +93,10 @@ class _CL:
         c.clBuildProgram.argtypes = [ctypes.c_void_p, ctypes.c_uint, ctypes.POINTER(ctypes.c_void_p), ctypes.c_char_p, ctypes.c_void_p, ctypes.c_void_p]
         c.clGetProgramBuildInfo.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint, ctypes.c_size_t, ctypes.c_void_p, ctypes.POINTER(ctypes.c_size_t)]
         c.clCreateKernel.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.POINTER(ctypes.c_int)]
+        c.clGetKernelWorkGroupInfo.argtypes = [
+            ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint,
+            ctypes.c_size_t, ctypes.c_void_p, ctypes.POINTER(ctypes.c_size_t),
+        ]
         c.clSetKernelArg.argtypes = [ctypes.c_void_p, ctypes.c_uint, ctypes.c_size_t, ctypes.c_void_p]
         c.clEnqueueNDRangeKernel.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint, ctypes.POINTER(ctypes.c_size_t), ctypes.POINTER(ctypes.c_size_t), ctypes.POINTER(ctypes.c_size_t), ctypes.c_uint, ctypes.c_void_p, ctypes.c_void_p]
         c.clEnqueueReadBuffer.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint, ctypes.c_size_t, ctypes.c_size_t, ctypes.c_void_p, ctypes.c_uint, ctypes.c_void_p, ctypes.c_void_p]
@@ -203,6 +212,46 @@ def make_context_and_queue(cl: _CL, plat: int, dev: int):
     return ctx, q
 
 
+def kernel_work_group_limit(cl: _CL, kernel: int, dev: int) -> int:
+    """Return the compiled kernel's maximum total local work-group size."""
+    value = ctypes.c_size_t(0)
+    cl._chk(
+        cl.lib.clGetKernelWorkGroupInfo(
+            kernel,
+            dev,
+            CL_KERNEL_WORK_GROUP_SIZE,
+            ctypes.sizeof(value),
+            ctypes.byref(value),
+            None,
+        ),
+        "GetKernelWorkGroupInfo[WORK_GROUP_SIZE]",
+    )
+    return int(value.value)
+
+
+def _validate_launch_geometry(
+    global_size: Tuple[int, ...],
+    local_size: Optional[Tuple[int, ...]],
+    kernel_limit: Optional[int] = None,
+) -> None:
+    if local_size is None:
+        return
+    if len(local_size) != len(global_size):
+        raise ValueError("local_size dimensionality must match global_size")
+    total = 1
+    for g, l in zip(global_size, local_size):
+        if l <= 0 or g % l != 0:
+            raise ValueError(
+                f"global size {g} must be divisible by local size {l}"
+            )
+        total *= l
+    if kernel_limit is not None and total > kernel_limit:
+        raise ValueError(
+            f"requested local work-group size {total} exceeds compiled "
+            f"kernel/device limit {kernel_limit}"
+        )
+
+
 def run_ndrange(cl: _CL, ctx: int, q: int, source: str,
                 kernel_name: str, args: List[Any],
                 out_indices: List[int],
@@ -223,6 +272,14 @@ def run_ndrange(cl: _CL, ctx: int, q: int, source: str,
     err = ctypes.c_int(0)
     kern = cl.lib.clCreateKernel(prog, kernel_name.encode(), ctypes.byref(err))
     cl._chk(err.value, f"CreateKernel {kernel_name}")
+
+    try:
+        launch_limit = kernel_work_group_limit(cl, kern, dev)
+        _validate_launch_geometry(global_size, local_size, launch_limit)
+    except Exception:
+        cl.lib.clReleaseKernel(kern)
+        cl.lib.clReleaseProgram(prog)
+        raise
 
     mems: Dict[int, int] = {}
     for idx, item in enumerate(args):
@@ -263,13 +320,6 @@ def run_ndrange(cl: _CL, ctx: int, q: int, source: str,
     gsz = (ctypes.c_size_t * gdim)(*global_size)
     lsz = None
     if local_size is not None:
-        if len(local_size) != gdim:
-            raise ValueError("local_size dimensionality must match global_size")
-        for g, l in zip(global_size, local_size):
-            if l <= 0 or g % l != 0:
-                raise ValueError(
-                    f"global size {g} must be divisible by local size {l}"
-                )
         lsz = (ctypes.c_size_t * gdim)(*local_size)
     rc = cl.lib.clEnqueueNDRangeKernel(q, kern, gdim, None, gsz, lsz, 0, None, None)
     cl._chk(rc, "EnqueueNDRangeKernel")

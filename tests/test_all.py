@@ -17,7 +17,9 @@ HERE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(HERE / "scripts"))
 
-from cuda_translator import fatbin, elf, pe, ptx, interpreter, pipeline  # noqa: E402
+from cuda_translator import (  # noqa: E402
+    fatbin, elf, pe, ptx, interpreter, pipeline, opencl_runner,
+)
 from cuda_translator.ir import reachable_unsupported  # noqa: E402
 from cuda_translator.opencl import emit_program, emit_kernel, TranslationAbort  # noqa: E402
 from cuda_translator.numeric_oracles import (  # noqa: E402
@@ -319,6 +321,39 @@ class TestBackendSemantics(unittest.TestCase):
         bc = [k for k in hres.kernels if k.name == "bin_classify"][0]
         self.assertEqual(reachable_unsupported(bc), [])
         emit_kernel(bc)  # structured multi-branch guard idiom lowers
+
+
+class TestOpenCLRunnerContracts(unittest.TestCase):
+    def test_kernel_work_group_constants_are_canonical(self):
+        self.assertEqual(opencl_runner.CL_KERNEL_WORK_GROUP_SIZE, 0x11B0)
+        self.assertEqual(
+            opencl_runner.CL_KERNEL_COMPILE_WORK_GROUP_SIZE,
+            0x11B1,
+        )
+        self.assertEqual(opencl_runner.CL_KERNEL_LOCAL_MEM_SIZE, 0x11B2)
+        self.assertEqual(
+            opencl_runner.CL_KERNEL_PREFERRED_WORK_GROUP_SIZE_MULTIPLE,
+            0x11B3,
+        )
+        self.assertEqual(opencl_runner.CL_KERNEL_PRIVATE_MEM_SIZE, 0x11B4)
+
+    def test_launch_geometry_reports_kernel_limit(self):
+        with self.assertRaisesRegex(
+            ValueError,
+            r"384 exceeds compiled kernel/device limit 256",
+        ):
+            opencl_runner._validate_launch_geometry(
+                (768,),
+                (384,),
+                256,
+            )
+
+    def test_launch_geometry_accepts_limit_boundary(self):
+        opencl_runner._validate_launch_geometry(
+            (512,),
+            (256,),
+            256,
+        )
 
 
 class TestExactOracles(unittest.TestCase):

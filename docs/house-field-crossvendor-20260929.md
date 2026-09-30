@@ -107,7 +107,7 @@ case.
 
 After the fix:
 
-* translator unit suite: **32/32 PASS**;
+* translator unit suite after launch-limit hardening: **35/35 PASS**;
 * exact 452 KB PTX analysis: **0 errors** (two non-semantic `.common`
   inspection warnings);
 * strict translation: **PASS**;
@@ -144,6 +144,45 @@ counterfactual
 ```
 
 AMD bytes matched the captured NVIDIA CUDA bytes exactly.
+
+
+
+## Scale stress and device envelope
+
+The same translated kernel was then replayed with deterministic House Field
+scale topologies built by the accepted benchmark topology generator:
+
+| nodes | degree | CUDA threads/block | dynamic shared | AMD result |
+|---:|---:|---:|---:|---|
+| 128 | 8 | 128 | 6,144 B | **all 25 arrays byte-identical**, max_abs 0.0 |
+| 256 | 12 | 256 | 12,288 B | **all 25 arrays byte-identical**, max_abs 0.0 |
+| 384 | 14 | 384 | 18,432 B | not launchable on this AMD device; compiled kernel/device work-group limit is 256 |
+
+The 384-node NVIDIA capture itself completed successfully. AMD rejected the
+launch before execution because this `gfx90c` OpenCL device reports a
+maximum work-group size of 256 and the compiled translated kernel reports the
+same maximum. Its preferred work-group multiple is 64 and the device exposes
+32 KiB local memory.
+
+This is a hardware execution-envelope difference, not a translation
+mismatch. The runner now queries canonical `CL_KERNEL_WORK_GROUP_SIZE`
+before enqueue and reports:
+
+```text
+requested local work-group size 384 exceeds compiled kernel/device limit 256
+```
+
+The scale test also exposed a stale, previously unused constant-table entry:
+`CL_KERNEL_COMPILE_WORK_GROUP_SIZE` had been labeled `0x11B4`.
+Canonical Khronos values are now used:
+
+* `CL_KERNEL_WORK_GROUP_SIZE = 0x11B0`
+* `CL_KERNEL_COMPILE_WORK_GROUP_SIZE = 0x11B1`
+* `CL_KERNEL_LOCAL_MEM_SIZE = 0x11B2`
+* `CL_KERNEL_PREFERRED_WORK_GROUP_SIZE_MULTIPLE = 0x11B3`
+* `CL_KERNEL_PRIVATE_MEM_SIZE = 0x11B4`
+
+The suite pins both the constants and the launch-limit error contract.
 
 ## What this proves — and what it does not
 

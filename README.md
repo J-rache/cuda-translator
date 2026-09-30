@@ -32,7 +32,7 @@ are in [docs/ground-truth.md](docs/ground-truth.md).
 | Differential semantics | same source, `-fmad=false` build: 0 `fma` ops in PTX, interpreter matches the **unfused** oracle 1024/1024 — the tool preserves each binary's own float contract |
 | Fail-closed | `atomicAdd` kernel refused with exact opcode + PTX line; REST returns **HTTP 422**, MCP returns `isError: true`; nothing wrong-but-compiling is ever emitted |
 | Data-dependent CFG | `bin_classify` (nested guards from `&` of comparisons) parses and translates cleanly |
-| Real Numba/NVVM stress kernel | 452 KB / 6,785-line House Field PTX with dynamic shared memory, barriers, FP64 division and loops compiles on AMD `gfx90c`; a captured 16-slice NVIDIA CUDA launch replays **byte-identically for every input, scratch and output buffer** ([receipt](docs/house-field-crossvendor-20260929.md)) |
+| Real Numba/NVVM stress kernel | 452 KB / 6,785-line House Field PTX with dynamic shared memory, barriers, FP64 division and loops compiles on AMD `gfx90c`; captured NVIDIA CUDA launches replay **byte-identically for every input, scratch and output buffer** at 9, 128 and 256 nodes ([receipt](docs/house-field-crossvendor-20260929.md)) |
 
 ## Install
 
@@ -110,6 +110,9 @@ print(out["not_translated"])     # refused kernels, with reasons
 * **Shared-memory subset:** unsized `.extern .shared`, typed `ld/st.shared`,
   `%dynamic_smem_size`, and `bar.sync 0` are proven. Other barrier shapes
   and unsupported memory instructions fail closed.
+* **Device launch limits are explicit:** the runner queries the compiled
+  kernel's `CL_KERNEL_WORK_GROUP_SIZE` and rejects an oversized local group
+  before execution with the requested size and device/kernel limit.
 * **e_flags arch decoding** is empirically verified against 11 real
   nvcc 12.9 cubins (sm_50–sm_90 in one layout, sm_100/sm_120 in another;
   full matrix in docs/ground-truth.md) — not claimed as NVIDIA's formal
@@ -124,7 +127,7 @@ cuda_translator/      the app: ptx, ir, opencl, fatbin, elf, pe,
                       interpreter, numeric_oracles, pipeline, verify,
                       cli, rest, mcp_server
 scripts/              opencl_runner (ctypes ICD), verify_numeric driver
-tests/                unittest suite (32 tests) + MCP smoke client
+tests/                unittest suite (35 tests) + MCP smoke client
 tools/                NVRTC PTX generator (second compiler path)
 examples/             .cu sources + NVIDIA-generated proof artifacts
 docs/ground-truth.md  how every fixture was made + oracle commands
