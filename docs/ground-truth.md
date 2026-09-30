@@ -18,8 +18,12 @@ outer fatbin size excludes the 16-byte header).
   version officially, so every nvcc command below used
   `-allow-unsupported-compiler`. **This is a fixture-build accommodation,
   not a claim that CUDA 12.9 supports MSVC 14.50.**
-* OpenCL device used for the numeric acceptance seam: Intel(R) Iris(R) Xe
-  Graphics via Intel(R) OpenCL Graphics (96 EUs) — cross-vendor vs NVIDIA.
+* OpenCL devices used for the numeric acceptance seam:
+  * Intel(R) Iris(R) Xe Graphics via Intel(R) OpenCL Graphics, driver
+    `32.0.101.7082`, 96 reported OpenCL compute units.
+  * AMD `gfx90c` via AMD Accelerated Parallel Processing, driver
+    `3584.0 (PAL,HSAIL)`, 8 reported OpenCL compute units.
+  Both are cross-vendor execution targets for NVIDIA-produced PTX.
 
 ## Fixture generation (exact commands)
 
@@ -108,11 +112,19 @@ final rounding). Validation: **0 mismatches vs native `fmaf` (ucrtbase) on
 random triples, so FMA-semantics tests are discriminating, not vacuous.
 
 Acceptance seam (`python cuda-translator.py verify`):
-nvcc PTX → House IR → OpenCL C → Intel Iris Xe GPU → compare against exact
-oracles: vector_add 1024/1024 bit-exact; saxpy 1024/1024 bit-exact vs the
-fused oracle (and not vs unfused). The `-fmad=false` build shows 0 `fma`
-ops in PTX and its interpreter/translation match the unfused oracle
-1024/1024 — semantics follow the binary, not a hardcoded model.
+nvcc PTX → House IR → OpenCL C → independent OpenCL device → compare against
+exact oracles. The same translated fixtures were executed on both Intel Iris
+Xe and AMD gfx90c: vector_add 1024/1024 bit-exact; saxpy 1024/1024 bit-exact
+vs the fused oracle (and not vs unfused) on each device. The `-fmad=false`
+build shows 0 `fma` ops in PTX and its interpreter/translation match the
+unfused oracle 1024/1024 — semantics follow the binary, not a hardcoded model.
+
+Packaging acceptance was also run from fresh virtual environments after
+`pip install .`: the installed CLI can analyze and verify without checkout-only
+imports; installed MCP completes initialize/tools/verify on Intel; installed
+REST health and `/api/verify` work on Intel, while installed verification and
+REST health also pass on AMD. The bundled verification PTX and ctypes OpenCL
+runner are package data/code, not dependencies on the source tree.
 
 ## Device metadata (correction receipt)
 

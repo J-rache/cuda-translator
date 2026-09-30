@@ -102,7 +102,8 @@ class _CL:
         c.clEnqueueReadBuffer.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint, ctypes.c_size_t, ctypes.c_size_t, ctypes.c_void_p, ctypes.c_uint, ctypes.c_void_p, ctypes.c_void_p]
         c.clEnqueueWriteBuffer.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint, ctypes.c_size_t, ctypes.c_size_t, ctypes.c_void_p, ctypes.c_uint, ctypes.c_void_p, ctypes.c_void_p]
         c.clFinish.argtypes = [ctypes.c_void_p]
-        for fn in ("clReleaseMemObject", "clReleaseKernel", "clReleaseProgram"):
+        for fn in ("clReleaseMemObject", "clReleaseKernel", "clReleaseProgram",
+                   "clReleaseCommandQueue", "clReleaseContext"):
             getattr(c, fn).argtypes = [ctypes.c_void_p]
 
     def _chk(self, rc: int, what: str) -> None:
