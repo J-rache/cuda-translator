@@ -396,6 +396,83 @@ class TestOpenCLRunnerContracts(unittest.TestCase):
         )
         self.assertEqual(opencl_runner.CL_KERNEL_PRIVATE_MEM_SIZE, 0x11B4)
 
+    def test_device_info_fp64_capability_is_explicit(self):
+        by_config = opencl_runner.DeviceInfo(
+            platform="p",
+            device="d",
+            driver="x",
+            compute_units=1,
+            double_fp_config=1,
+        )
+        by_extension = opencl_runner.DeviceInfo(
+            platform="p",
+            device="d",
+            driver="x",
+            compute_units=1,
+            extensions="cl_khr_fp64 cl_khr_byte_addressable_store",
+        )
+        missing = opencl_runner.DeviceInfo(
+            platform="p",
+            device="d",
+            driver="x",
+            compute_units=1,
+        )
+        self.assertTrue(by_config.supports_fp64)
+        self.assertTrue(by_extension.supports_fp64)
+        self.assertFalse(missing.supports_fp64)
+
+    def test_fp64_selection_skips_non_fp64_gpu_for_cpu(self):
+        gpu = opencl_runner.DeviceInfo(
+            platform="intel",
+            device="gpu",
+            driver="1",
+            compute_units=96,
+            device_type=opencl_runner.CL_DEVICE_TYPE_GPU,
+            double_fp_config=0,
+        )
+        cpu = opencl_runner.DeviceInfo(
+            platform="intel",
+            device="cpu",
+            driver="1",
+            compute_units=4,
+            device_type=opencl_runner.CL_DEVICE_TYPE_CPU,
+            double_fp_config=1,
+        )
+        record = opencl_runner._select_device_record(
+            [(gpu, 1, 11), (cpu, 1, 22)],
+            prefer_gpu=True,
+            require_fp64=True,
+        )
+        self.assertIsNotNone(record)
+        self.assertEqual(record[0].device, "cpu")
+        self.assertEqual(record[2], 22)
+
+    def test_fp64_selection_prefers_eligible_gpu(self):
+        cpu = opencl_runner.DeviceInfo(
+            platform="p",
+            device="cpu",
+            driver="1",
+            compute_units=4,
+            device_type=opencl_runner.CL_DEVICE_TYPE_CPU,
+            double_fp_config=1,
+        )
+        gpu = opencl_runner.DeviceInfo(
+            platform="p",
+            device="gpu",
+            driver="1",
+            compute_units=8,
+            device_type=opencl_runner.CL_DEVICE_TYPE_GPU,
+            extensions="cl_khr_fp64",
+        )
+        record = opencl_runner._select_device_record(
+            [(cpu, 1, 22), (gpu, 1, 11)],
+            prefer_gpu=True,
+            require_fp64=True,
+        )
+        self.assertIsNotNone(record)
+        self.assertEqual(record[0].device, "gpu")
+        self.assertEqual(record[2], 11)
+
     def test_launch_geometry_reports_kernel_limit(self):
         with self.assertRaisesRegex(
             ValueError,

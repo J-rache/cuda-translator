@@ -35,12 +35,17 @@ CL_PLATFORM_VERSION = 0x0901
 CL_PLATFORM_NAME = 0x0902
 CL_PLATFORM_VENDOR = 0x0903
 CL_PLATFORM_EXTENSIONS = 0x0904
+CL_DEVICE_TYPE = 0x1000
+CL_DEVICE_TYPE_CPU = 1 << 1
 CL_DEVICE_TYPE_GPU = 1 << 2
 CL_DEVICE_TYPE_ALL = 0xFFFFFFFF
 CL_DEVICE_NAME = 0x102B
+CL_DEVICE_VENDOR = 0x102C
 CL_DRIVER_VERSION = 0x102D  # NOTE: 0x1027 is CL_DEVICE_AVAILABLE (a bool!)
 CL_DEVICE_AVAILABLE = 0x1027
 CL_DEVICE_MAX_COMPUTE_UNITS = 0x1002
+CL_DEVICE_EXTENSIONS = 0x1030
+CL_DEVICE_DOUBLE_FP_CONFIG = 0x1032
 CL_TRUE = 1
 
 
@@ -50,6 +55,17 @@ class DeviceInfo:
     device: str
     driver: str
     compute_units: int
+    vendor: str = ""
+    device_type: int = 0
+    available: bool = True
+    extensions: str = ""
+    double_fp_config: int = 0
+
+    @property
+    def supports_fp64(self) -> bool:
+        return bool(self.double_fp_config) or (
+            "cl_khr_fp64" in self.extensions.split()
+        )
 
 
 @dataclass
@@ -124,55 +140,181 @@ class _CL:
         return buf.value.decode("utf-8", "replace")
 
 
-def first_device(prefer_gpu: bool = True) -> Tuple[Optional[_CL], Optional[DeviceInfo], Optional[int], Optional[int]]:
-    """Return (cl, device_info, platform_id, device_id) or (None, None, None, None)."""
+def _device_scalar(cl: _CL, dev: int, which: int, ctype):
+    value = ctype()
+    cl._chk(
+        cl.lib.clGetDeviceInfo(
+            dev,
+            which,
+            ctypes.sizeof(value),
+            ctypes.byref(value),
+            None,
+        ),
+        f"GetDeviceInfo[{hex(which)}]",
+    )
+    return value.value
+
+
+def enumerate_devices() -> Tuple[
+    Optional[_CL],
+    List[Tuple[DeviceInfo, int, int]],
+]:
+    """Enumerate every OpenCL device with portable qualification metadata."""
     lib = _load_opencl()
     if lib is None:
-        return None, None, None, None
+        return None, []
+
     cl = _CL(lib)
     nplat = ctypes.c_uint(0)
     rc = lib.clGetPlatformIDs(0, None, ctypes.byref(nplat))
-    if rc == CL_PLATFORM_NOT_FOUND_KHR or (rc == CL_SUCCESS and nplat.value == 0):
-        return None, None, None, None
+    if rc == CL_PLATFORM_NOT_FOUND_KHR or (
+        rc == CL_SUCCESS and nplat.value == 0
+    ):
+        return None, []
     cl._chk(rc, "GetPlatformIDs")
+
     plats = (ctypes.c_void_p * nplat.value)()
-    cl._chk(lib.clGetPlatformIDs(nplat.value, plats, None), "GetPlatformIDs")
-    chosen = None
-    for p in plats:
+    cl._chk(
+        lib.clGetPlatformIDs(nplat.value, plats, None),
+        "GetPlatformIDs",
+    )
+
+    records: List[Tuple[DeviceInfo, int, int]] = []
+    for p_handle in plats:
+        p = int(p_handle)
         ndev = ctypes.c_uint(0)
-        want = CL_DEVICE_TYPE_GPU if prefer_gpu else CL_DEVICE_TYPE_ALL
-        rc = lib.clGetDeviceIDs(p, want, 0, None, ctypes.byref(ndev))
-        if rc == CL_SUCCESS and ndev.value > 0:
-            chosen = (p, want)
-            break
-        if prefer_gpu and rc != CL_SUCCESS:
-            rc2 = lib.clGetDeviceIDs(p, CL_DEVICE_TYPE_ALL, 0, None, ctypes.byref(ndev))
-            if rc2 == CL_SUCCESS and ndev.value > 0:
-                chosen = (p, CL_DEVICE_TYPE_ALL)
-                break
+        rc = lib.clGetDeviceIDs(
+            p,
+            CL_DEVICE_TYPE_ALL,
+            0,
+            None,
+            ctypes.byref(ndev),
+        )
+        if rc != CL_SUCCESS or ndev.value == 0:
+            continue
+
+        devs = (ctypes.c_void_p * ndev.value)()
+        cl._chk(
+            lib.clGetDeviceIDs(
+                p,
+                CL_DEVICE_TYPE_ALL,
+                ndev.value,
+                devs,
+                None,
+            ),
+            "GetDeviceIDs",
+        )
+
+        platform_name = cl.info_string(
+            p,
+            CL_PLATFORM_NAME,
+            "platform",
+        )
+        for d_handle in devs:
+            d = int(d_handle)
+            info = DeviceInfo(
+                platform=platform_name,
+                device=cl.info_string(d, CL_DEVICE_NAME),
+                driver=cl.info_string(d, CL_DRIVER_VERSION),
+                compute_units=int(
+                    _device_scalar(
+                        cl,
+                        d,
+                        CL_DEVICE_MAX_COMPUTE_UNITS,
+                        ctypes.c_uint,
+                    )
+                ),
+                vendor=cl.info_string(d, CL_DEVICE_VENDOR),
+                device_type=int(
+                    _device_scalar(
+                        cl,
+                        d,
+                        CL_DEVICE_TYPE,
+                        ctypes.c_ulonglong,
+                    )
+                ),
+                available=bool(
+                    _device_scalar(
+                        cl,
+                        d,
+                        CL_DEVICE_AVAILABLE,
+                        ctypes.c_uint,
+                    )
+                ),
+                extensions=cl.info_string(
+                    d,
+                    CL_DEVICE_EXTENSIONS,
+                ),
+                double_fp_config=int(
+                    _device_scalar(
+                        cl,
+                        d,
+                        CL_DEVICE_DOUBLE_FP_CONFIG,
+                        ctypes.c_ulonglong,
+                    )
+                ),
+            )
+            records.append((info, p, d))
+    return cl, records
+
+
+def _select_device_record(
+    records: List[Tuple[DeviceInfo, int, int]],
+    *,
+    prefer_gpu: bool,
+    require_fp64: bool,
+):
+    eligible = [
+        record
+        for record in records
+        if record[0].available
+        and (
+            not require_fp64
+            or record[0].supports_fp64
+        )
+    ]
+    if prefer_gpu:
+        eligible.sort(
+            key=lambda record: (
+                0
+                if record[0].device_type & CL_DEVICE_TYPE_GPU
+                else 1
+            )
+        )
+    return eligible[0] if eligible else None
+
+
+def first_device(
+    prefer_gpu: bool = True,
+    require_fp64: bool = False,
+) -> Tuple[
+    Optional[_CL],
+    Optional[DeviceInfo],
+    Optional[int],
+    Optional[int],
+]:
+    """Return the first available device satisfying requested capabilities.
+
+    With prefer_gpu=True, eligible GPUs sort before non-GPU devices. When
+    require_fp64=True, devices lacking double-precision support are skipped
+    before context creation or kernel compilation. This lets callers fail
+    closed without surfacing a megabyte-scale compiler log for an impossible
+    float64 kernel.
+    """
+    cl, records = enumerate_devices()
+    if cl is None:
+        return None, None, None, None
+
+    chosen = _select_device_record(
+        records,
+        prefer_gpu=prefer_gpu,
+        require_fp64=require_fp64,
+    )
     if chosen is None:
         return None, None, None, None
-    p, dtype = chosen
-    ndev = ctypes.c_uint(0)
-    cl._chk(lib.clGetDeviceIDs(p, dtype, 0, None, ctypes.byref(ndev)), "GetDeviceIDs")
-    devs = (ctypes.c_void_p * ndev.value)()
-    cl._chk(lib.clGetDeviceIDs(p, dtype, ndev.value, devs, None), "GetDeviceIDs")
-    d = devs[0]
-    # Canonical constants only — no heuristics. (Correction receipt: an
-    # earlier revision queried 0x1027, which is CL_DEVICE_AVAILABLE, decoded
-    # the 4-byte boolean as a string, and then "fixed" the resulting junk
-    # with content guessing. The ICD was conformant the whole time; the
-    # constant table was wrong. See docs/ground-truth.md.)
-    info = DeviceInfo(
-        platform=cl.info_string(p, CL_PLATFORM_NAME, "platform"),
-        device=cl.info_string(d, CL_DEVICE_NAME),
-        driver=cl.info_string(d, CL_DRIVER_VERSION),
-        compute_units=ctypes.c_uint(0).value or 0,
-    )
-    cu = ctypes.c_uint(0)
-    cl.lib.clGetDeviceInfo(d, CL_DEVICE_MAX_COMPUTE_UNITS, 4, ctypes.byref(cu), None)
-    info.compute_units = cu.value
-    return cl, info, p, d
+
+    info, platform_id, device_id = chosen
+    return cl, info, platform_id, device_id
 
 
 def compile_kernel(cl: _CL, ctx: int, dev: int, source: str) -> int:
