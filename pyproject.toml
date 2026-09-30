@@ -14,3 +14,6 @@ cuda-translator = "cuda_translator.cli:main"
 
 [tool.setuptools]
 packages = ["cuda_translator"]
+
+[tool.setuptools.package-data]
+cuda_translator = ["fixtures/*.ptx"]

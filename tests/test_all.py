@@ -264,5 +264,22 @@ class TestPipeline(unittest.TestCase):
         self.assertTrue(any(f["size"] == 4928 for f in rep["embedded_fatbins"]))
 
 
+class TestPackaging(unittest.TestCase):
+    def test_bundled_verification_fixture_is_available(self):
+        from importlib import resources
+        text = (
+            resources.files("cuda_translator")
+            .joinpath("fixtures", "vector_add_sm75.ptx")
+            .read_text(encoding="utf-8")
+        )
+        self.assertIn(".entry vector_add", text)
+        self.assertIn(".entry saxpy", text)
+
+    def test_packaged_opencl_runner_imports_without_checkout_scripts(self):
+        from cuda_translator import opencl_runner
+        self.assertTrue(callable(opencl_runner.first_device))
+
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

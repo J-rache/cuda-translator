@@ -8,6 +8,7 @@ from __future__ import annotations
 import os
 import random
 import struct
+from importlib import resources
 from typing import Any, Dict
 
 from . import ptx
@@ -22,9 +23,12 @@ def f32(x: float) -> float:
     return struct.unpack("<f", struct.pack("<f", x))[0]
 
 
-def _default_ptx_path() -> str:
-    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    return os.path.join(here, "examples", "artifacts", "vector_add_sm75.ptx")
+def _default_ptx_text() -> str:
+    return (
+        resources.files("cuda_translator")
+        .joinpath("fixtures", "vector_add_sm75.ptx")
+        .read_text(encoding="utf-8")
+    )
 
 
 def build_references(xs, ys, alpha, n):
@@ -43,15 +47,16 @@ def run_verification(ptx_path: str = None, n: int = N,
     Honesty contract: if no OpenCL device exists the verdict says so
     (verdict 'NO-DEVICE') instead of faking a pass.
     """
-    import sys
-    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    if os.path.join(here, "scripts") not in sys.path:
-        sys.path.insert(0, os.path.join(here, "scripts"))
-    import opencl_runner
+    from . import opencl_runner
 
-    ptx_path = ptx_path or _default_ptx_path()
-    ptx_text = open(ptx_path, "rb").read().decode()
-    res = ptx.parse_ptx(ptx_text, os.path.basename(ptx_path))
+    if ptx_path:
+        with open(ptx_path, "r", encoding="utf-8") as f:
+            ptx_text = f.read()
+        source_name = os.path.basename(ptx_path)
+    else:
+        ptx_text = _default_ptx_text()
+        source_name = "vector_add_sm75.ptx"
+    res = ptx.parse_ptx(ptx_text, source_name)
     bad = {k.name: reachable_unsupported(k) for k in res.kernels}
     if any(bad.values()):
         return {"verdict": "FAIL", "reason": "reachable unsupported ops",

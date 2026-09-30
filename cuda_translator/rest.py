@@ -89,12 +89,7 @@ def _translate(data: bytes):
 
 def _opencl_device_summary() -> str:
     try:
-        import os
-        import sys
-        here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        if os.path.join(here, "scripts") not in sys.path:
-            sys.path.insert(0, os.path.join(here, "scripts"))
-        import opencl_runner
+        from . import opencl_runner
         cl, info, _, _ = opencl_runner.first_device()
         if cl is None:
             return "none"
