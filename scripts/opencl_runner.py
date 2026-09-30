@@ -24,11 +24,17 @@ CL_MEM_READ_WRITE = 0x1
 CL_MEM_COPY_HOST_PTR = 0x10
 CL_KERNEL_COMPILE_WORK_GROUP_SIZE = 0x11B4
 CL_PROGRAM_BUILD_LOG = 0x1183
+# Canonical Khronos constants (cl_platform.h):
+CL_PLATFORM_PROFILE = 0x0900
+CL_PLATFORM_VERSION = 0x0901
 CL_PLATFORM_NAME = 0x0902
+CL_PLATFORM_VENDOR = 0x0903
+CL_PLATFORM_EXTENSIONS = 0x0904
 CL_DEVICE_TYPE_GPU = 1 << 2
 CL_DEVICE_TYPE_ALL = 0xFFFFFFFF
 CL_DEVICE_NAME = 0x102B
-CL_DRIVER_VERSION = 0x1027
+CL_DRIVER_VERSION = 0x102D  # NOTE: 0x1027 is CL_DEVICE_AVAILABLE (a bool!)
+CL_DEVICE_AVAILABLE = 0x1027
 CL_DEVICE_MAX_COMPUTE_UNITS = 0x1002
 CL_TRUE = 1
 
@@ -142,6 +148,11 @@ def first_device(prefer_gpu: bool = True) -> Tuple[Optional[_CL], Optional[Devic
     devs = (ctypes.c_void_p * ndev.value)()
     cl._chk(lib.clGetDeviceIDs(p, dtype, ndev.value, devs, None), "GetDeviceIDs")
     d = devs[0]
+    # Canonical constants only — no heuristics. (Correction receipt: an
+    # earlier revision queried 0x1027, which is CL_DEVICE_AVAILABLE, decoded
+    # the 4-byte boolean as a string, and then "fixed" the resulting junk
+    # with content guessing. The ICD was conformant the whole time; the
+    # constant table was wrong. See docs/ground-truth.md.)
     info = DeviceInfo(
         platform=cl.info_string(p, CL_PLATFORM_NAME, "platform"),
         device=cl.info_string(d, CL_DEVICE_NAME),

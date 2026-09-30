@@ -1,10 +1,13 @@
 __pycache__/
 *.pyc
 .toolchain/
-*.exe
-*.cubin
-*.fatbin
 build/
 dist/
 *.egg-info/
 .venv/
+
+# artifacts are proof fixtures: tracked, except generated intermediates
+examples/artifacts/oracle_scratch/
+examples/artifacts/numeric_verdict.json
+examples/artifacts/vector_add_host.lib
+examples/artifacts/vector_add_host.exp

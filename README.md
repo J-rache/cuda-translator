@@ -1,0 +1,127 @@
+# cuda-translator
+
+A free-standing app that translates CUDA binaries into artifacts any other
+application can use — and proves the translation numerically on a real,
+non-NVIDIA GPU.
+
+```
+CUDA container (PTX / fatbin / cubin / PE host binary)
+        ↓  frontends (container parsers + PTX parser)
+   House GPU IR  (neutral, fail-closed, address provenance explicit)
+        ↓  backend
+   OpenCL C
+        ↓  ctypes ICD runner (no dependencies)
+   GPU execution  →  bit-exact compare vs exact integer oracles
+```
+
+## What is proven (machine truth, not narrative)
+
+All fixtures are real NVIDIA compiler output; provenance and oracle commands
+are in [docs/ground-truth.md](docs/ground-truth.md).
+
+| Seam | Proof |
+|---|---|
+| fatbin parser + custom LZ decoder | compressed PTX entry decompresses **byte-for-byte** equal to NVIDIA's own `-no-compress` fatbin of the same source |
+| fatbin ELF entry | byte-identical to the standalone `nvcc -cubin` file (sha256 match) |
+| PE scanner | finds both embedded fatbins in a real nvcc-built host exe; the 4928-byte one is byte-identical to `nvcc -fatbin` output |
+| ELF cubin parser | `e_machine`/`e_flags` read from real bytes; `sm_50…sm_90` cubins all decode `sm_NN` + both entry symbols |
+| PTX frontend | zero diagnostics on nvcc **and** NVRTC output (two independent NVIDIA compilers); pointer params and per-load address provenance fully resolved |
+| OpenCL backend | output **compiled and executed by the Intel OpenCL runtime** (Iris Xe, 96 EUs) — cross-vendor |
+| Numeric acceptance | `vector_add` **1024/1024 bit-exact**; `saxpy` **1024/1024 bit-exact vs the fused-FMA oracle** (nvcc emits `fma.rn.f32`), and provably *not* unfused |
+| FMA oracles | exact integer-arithmetic `fma.rn.f32` matches native `fmaf` on 300k random triples; fused≠unfused on ~25% of triples (real discriminating inputs) |
+| Differential semantics | same source, `-fmad=false` build: 0 `fma` ops in PTX, interpreter matches the **unfused** oracle 1024/1024 — the tool preserves each binary's own float contract |
+| Fail-closed | `atomicAdd` kernel refused with exact opcode + PTX line; REST returns **HTTP 422**, MCP returns `isError: true`; nothing wrong-but-compiling is ever emitted |
+| Data-dependent CFG | `bin_classify` (nested guards from `&` of comparisons) parses and translates cleanly |
+
+## Install
+
+No third-party packages required. Python 3.10+.
+
+```bat
+pip install .
+```
+
+or run from the checkout:
+
+```bat
+python cuda-translator.py --help
+```
+
+## CLI
+
+```bat
+:: structural analysis (PTX, cubin, fatbin, or PE)
+python cuda-translator.py analyze examples\artifacts\vector_add_sm75.fatbin
+
+:: fail-closed translation to OpenCL C (writes .cl files + House IR dump)
+python cuda-translator.py translate examples\artifacts\vector_add_sm75.ptx -o build\cl
+
+:: numeric acceptance seam (PASS / FAIL / NO-DEVICE - honestly)
+python cuda-translator.py verify
+
+:: REST API on http://127.0.0.1:8377
+python cuda-translator.py serve
+
+:: MCP stdio server (JSON-RPC 2.0)
+python cuda-translator.py mcp
+```
+
+## REST API
+
+| Method | Path | Body | Notes |
+|---|---|---|---|
+| GET | `/api/health` | – | service + detected OpenCL device |
+| POST | `/api/analyze` | raw artifact bytes | structural report |
+| POST | `/api/translate` | raw artifact bytes | **422** on fail-closed |
+| POST | `/api/translate-text` | `{"ptx": "..."}` | **422** on fail-closed |
+| POST | `/api/verify` | – | runs the full acceptance seam |
+
+## MCP server
+
+`python cuda-translator.py mcp` speaks MCP 2024-11-05 over stdio:
+
+* `analyze` — `{"input_b64": ...}` structural report
+* `translate` — `{"input_b64": ...}` OpenCL C (fail-closed → `isError`)
+* `translate_text` — `{"ptx": ...}`
+* `verify_numeric` — `{}` → PASS / FAIL / NO-DEVICE
+
+## Library
+
+```python
+from cuda_translator import analyze_input, translate_input, translate_ptx_text
+
+report = analyze_input(open("kernel.fatbin", "rb").read())
+out = translate_input(open("kernel.ptx", "rb").read())
+print(out["kernels"].keys())     # translatable kernels
+print(out["not_translated"])     # refused kernels, with reasons
+```
+
+## Honest limits (current, deliberate)
+
+* **SASS is not decompiled.** cubin analysis is structural (sections,
+  symbols, arch); translation rides the PTX entry, exactly like the CUDA
+  driver's JIT when PTX is present. A fatbin with no PTX cannot be
+  translated and says so.
+* **CFG subset:** only the NVIDIA guard idiom and its simple compositions
+  (no arbitrary loops yet). Anything unprovable fails closed with the
+  opcode and line.
+* **Multi-dimension kernels:** work-item builtins currently map `.x` only.
+* **e_flags arch decoding** is empirically verified against 11 real
+  nvcc 12.9 cubins (sm_50–sm_90 in one layout, sm_100/sm_120 in another;
+  full matrix in docs/ground-truth.md) — not claimed as NVIDIA's formal
+  universal encoding.
+* `verify` is honest about hardware: **NO-DEVICE** verdict if no OpenCL
+  runtime is present — never a fabricated pass.
+
+## Layout
+
+```
+cuda_translator/      the app: ptx, ir, opencl, fatbin, elf, pe,
+                      interpreter, numeric_oracles, pipeline, verify,
+                      cli, rest, mcp_server
+scripts/              opencl_runner (ctypes ICD), verify_numeric driver
+tests/                unittest suite (23 tests) + MCP smoke client
+tools/                NVRTC PTX generator (second compiler path)
+examples/             .cu sources + NVIDIA-generated proof artifacts
+docs/ground-truth.md  how every fixture was made + oracle commands
+```

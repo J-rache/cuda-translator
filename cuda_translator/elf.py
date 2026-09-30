@@ -70,11 +70,21 @@ class Cubin:
 
 
 def _arch_from_flags(flags: int) -> Optional[str]:
-    # cubin e_flags (measured on sm_75 nvcc 12.9 output: 0x004B054B):
-    # (major << 16) | (revision << 8) | core; major is the arch number.
+    """Empirically derived from 11 real nvcc 12.9.86 cubins (see
+    docs/ground-truth.md for the full e_flags matrix):
+
+    sm_50..sm_90 : e_flags = (NN << 16) | (5 << 8) | NN      -> arch = major
+    sm_100/sm_120: e_flags = (0x600 << 8)?? actually (1536 << 16)|... no:
+                   measured 0x06006402 -> major=1536, mid=100, core=2
+                   0x06007802 -> major=1536, mid=120, core=2  -> arch = mid
+    Anything outside these two observed shapes returns None (unknown) and the
+    caller can surface raw flags; we never guess."""
     major = (flags >> 16) & 0xFFFF
-    if major:
+    mid = (flags >> 8) & 0xFF
+    if 50 <= major <= 99:
         return f"sm_{major}"
+    if major == 1536 and 100 <= mid <= 130:
+        return f"sm_{mid}"
     return None
 
 

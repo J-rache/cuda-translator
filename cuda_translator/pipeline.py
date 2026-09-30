@@ -36,8 +36,11 @@ def detect_input(data: bytes) -> str:
             magic, version, hs, size = struct.unpack_from("<IHHQ", data, 0)
         if magic == 0xBA55ED50:
             return "fatbin"
-    head = data[:64].lstrip()
-    if b".version" in head or b".target" in head or b".entry" in head:
+    head = data[:4096]
+    # PTX may open with a comment banner, so scan past it; require a PTX-only
+    # directive to avoid false positives on random text.
+    if (b".version" in head and (b".target" in head or b".entry" in head)) \
+            or b".visible .entry" in head or b".entry" in head:
         return "ptx"
     raise InputError("unrecognized input: not PTX, cubin, fatbin, or PE")
 
@@ -68,6 +71,9 @@ def analyze_input(data: bytes, name: str = "<input>") -> Dict[str, Any]:
                     res = parse_ptx(e.text(), name)
                     ed["kernels"] = [k.name for k in res.kernels]
                     ed["diagnostics"] = res.diagnostics
+                    ver = res.notes.get("ptx_version")
+                    if ver:
+                        ed["ptx_isa"] = f"{ver[0]}.{ver[1]}"
                 except InputError as ex:
                     ed["diagnostics"] = [{"severity": "error", "message": str(ex)}]
             entries.append(ed)
@@ -152,6 +158,7 @@ def translate_input(data: bytes, name: str = "<input>",
         if not ptx_entries:
             raise InputError("fatbin has no PTX entries")
         text = "\n".join(e.text() for e in ptx_entries)
+        data = text.encode("utf-8")  # feed the extracted PTX, not the container
         kind = "ptx"
     if kind != "ptx":
         raise InputError(f"kind {kind} not translatable (only PTX/fatbin/PE)")
@@ -172,3 +179,24 @@ def translate_input(data: bytes, name: str = "<input>",
 def translate_ptx_text(text: str, name: str = "<ptx>",
                        kernel: Optional[str] = None) -> Dict[str, Any]:
     return translate_input(text.encode("utf-8"), name, kernel)
+
+
+def translate_input_strict(data: bytes, name: str = "<input>") -> Dict[str, Any]:
+    """Strict variant for API/MCP surfaces: ANY kernel refusing translation
+    raises TranslationError (HTTP 422 / MCP isError) instead of returning a
+    partial success that could be mistaken for complete."""
+    import re as _re
+    result = translate_input(data, name)
+    if result["not_translated"]:
+        first = result["not_translated"][0]
+        m = _re.search(r"kernel (\S+):.*?(opcode \S+, PTX line \d+|PTX line \d+)?",
+                       first)
+        kname = m.group(1) if m else ""
+        raise TranslationError(
+            f"fail-closed: {len(result['not_translated'])} kernel(s) refused; "
+            f"{first}", kernel=kname)
+    return result
+
+
+def translate_ptx_text_strict(text: str, name: str = "<ptx>") -> Dict[str, Any]:
+    return translate_input_strict(text.encode("utf-8"), name)

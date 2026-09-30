@@ -9,7 +9,7 @@
     "saxpy": 0
   },
   "oracle": "exact integer f32 oracles (numeric_oracles.py)",
-  "device": "Intel(R) OpenCL Graphics / Intel(R) Iris(R) Xe Graphics (driver \u0001, 96 CUs)",
+  "device": "Intel(R) OpenCL Graphics / Intel(R) Iris(R) Xe Graphics (driver 32.0.101.7082, 96 CUs)",
   "results": {
     "vector_add": {
       "status": "ran",
