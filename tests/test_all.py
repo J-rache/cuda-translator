@@ -323,7 +323,66 @@ class TestBackendSemantics(unittest.TestCase):
         emit_kernel(bc)  # structured multi-branch guard idiom lowers
 
 
+class _FakeQueueFailureLib:
+    def __init__(self):
+        self.context = 0x1234
+        self.released_contexts = []
+
+    def clCreateContext(
+        self,
+        _props,
+        _count,
+        _devices,
+        _callback,
+        _user_data,
+        _err_ptr,
+    ):
+        return self.context
+
+    def clCreateCommandQueue(
+        self,
+        _ctx,
+        _dev,
+        _props,
+        err_ptr,
+    ):
+        err_ptr._obj.value = -5
+        return None
+
+    def clReleaseContext(self, ctx):
+        self.released_contexts.append(ctx)
+        return 0
+
+
+class _FakeQueueFailureCL:
+    def __init__(self):
+        self.lib = _FakeQueueFailureLib()
+
+    @staticmethod
+    def _chk(code, where):
+        if code != 0:
+            raise RuntimeError(
+                f"OpenCL {where} failed: {code}"
+            )
+
+
 class TestOpenCLRunnerContracts(unittest.TestCase):
+    def test_queue_creation_failure_releases_created_context(self):
+        cl = _FakeQueueFailureCL()
+        with self.assertRaisesRegex(
+            RuntimeError,
+            r"CreateCommandQueue failed: -5",
+        ):
+            opencl_runner.make_context_and_queue(
+                cl,
+                1,
+                2,
+            )
+        self.assertEqual(
+            cl.lib.released_contexts,
+            [cl.lib.context],
+        )
+
     def test_kernel_work_group_constants_are_canonical(self):
         self.assertEqual(opencl_runner.CL_KERNEL_WORK_GROUP_SIZE, 0x11B0)
         self.assertEqual(

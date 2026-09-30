@@ -201,14 +201,34 @@ _SCALAR_CTYPES = {
 
 
 def make_context_and_queue(cl: _CL, plat: int, dev: int):
-    """Create (context, command queue) for a device."""
+    """Create (context, command queue) for a device.
+
+    If queue creation fails after a context has been created, release that
+    context before propagating the original failure.
+    """
     import ctypes
     err = ctypes.c_int(0)
     dref = ctypes.c_void_p(dev)
-    ctx = cl.lib.clCreateContext(None, 1, ctypes.byref(dref), None, None, ctypes.byref(err))
+    ctx = cl.lib.clCreateContext(
+        None,
+        1,
+        ctypes.byref(dref),
+        None,
+        None,
+        ctypes.byref(err),
+    )
     cl._chk(err.value, "CreateContext")
-    q = cl.lib.clCreateCommandQueue(ctx, dev, 0, ctypes.byref(err))
-    cl._chk(err.value, "CreateCommandQueue")
+    try:
+        q = cl.lib.clCreateCommandQueue(
+            ctx,
+            dev,
+            0,
+            ctypes.byref(err),
+        )
+        cl._chk(err.value, "CreateCommandQueue")
+    except Exception:
+        cl.lib.clReleaseContext(ctx)
+        raise
     return ctx, q
 
 
