@@ -1,1 +1,1 @@
-"""Bundled NVIDIA-generated PTX fixtures used by verification."""\n
+"""Bundled NVIDIA-generated PTX fixtures used by verification."""
