@@ -1,0 +1,15 @@
+include README.md
+include LICENSE
+include CONTRIBUTING.md
+include SECURITY.md
+include THIRD_PARTY_NOTICES.md
+include pyproject.toml
+include cuda-translator
+include cuda-translator.py
+recursive-include cuda_translator *.py
+recursive-include cuda_translator/fixtures *.ptx
+recursive-include docs *.md
+recursive-include examples *.cu *.ptx *.cubin *.fatbin *.exe
+recursive-include scripts *.py
+recursive-include tests *.py
+recursive-include tools *.py

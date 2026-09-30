@@ -1,19 +1,25 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "cuda-translator"
-version = "1.0.0"
+version = "0.1.0"
 description = "Translate CUDA binaries (PTX/fatbin/cubin/PE) into portable OpenCL C and inspection artifacts, with CLI, REST API, and MCP server."
+readme = "README.md"
 requires-python = ">=3.10"
-license = { text = "MIT" }
+license = "MIT"
+license-files = ["LICENSE"]
+
+[project.urls]
+Repository = "https://github.com/J-rache/cuda-translator"
+Issues = "https://github.com/J-rache/cuda-translator/issues"
 
 [project.scripts]
 cuda-translator = "cuda_translator.cli:main"
 
 [tool.setuptools]
-packages = ["cuda_translator"]
+packages = ["cuda_translator", "cuda_translator.fixtures"]
 
 [tool.setuptools.package-data]
 cuda_translator = ["fixtures/*.ptx"]

@@ -1,6 +1,6 @@
 """Package metadata for cuda-translator."""
 
-VERSION = "1.0.0"
+VERSION = "0.1.0"
 SERVER_NAME = "cuda-translator"
 MCP_PROTOCOL_VERSION = "2024-11-05"
 SCHEMA_VERSION = "cuda-translator.snapshot/1"

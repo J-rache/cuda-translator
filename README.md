@@ -1,8 +1,13 @@
 # cuda-translator
 
 A free-standing app that translates CUDA binaries into artifacts any other
-application can use — and proves the translation numerically on a real,
+application can use — and proves the translation numerically on real,
 non-NVIDIA GPUs.
+
+**Status: v0.1.0 pre-release.** This is a deliberately bounded translator,
+not a drop-in replacement for the CUDA driver or a general SASS decompiler.
+Unsupported or unprovable semantics fail closed instead of emitting an
+approximate translation.
 
 ```
 CUDA container (PTX / fatbin / cubin / PE host binary)
@@ -40,6 +45,7 @@ No third-party packages required. Python 3.10+.
 
 ```bat
 pip install .
+cuda-translator --help
 ```
 
 or run from the checkout:
@@ -99,6 +105,13 @@ print(out["kernels"].keys())     # translatable kernels
 print(out["not_translated"])     # refused kernels, with reasons
 ```
 
+## Security
+
+The REST server has no authentication or TLS and binds to loopback by default.
+Do not expose it directly to an untrusted network. CUDA/PTX inputs can cause
+compiler and GPU work; for hostile inputs, run the translator with least
+privilege and isolation. See [SECURITY.md](SECURITY.md).
+
 ## Honest limits (current, deliberate)
 
 * **SASS is not decompiled.** cubin analysis is structural (sections,
@@ -136,4 +149,13 @@ examples/             .cu sources + NVIDIA-generated proof artifacts
 docs/ground-truth.md  how every fixture was made + oracle commands
 docs/house-field-crossvendor-20260929.md
                       large real Numba/NVVM NVIDIA->AMD replay receipt
+LICENSE               MIT license
+SECURITY.md            security boundary and reporting guidance
+THIRD_PARTY_NOTICES.md fixture/reference attributions
 ```
+
+## License and notices
+
+The project is MIT licensed. See [LICENSE](LICENSE). Third-party references,
+fixture provenance, and NVIDIA-tooling notices are documented in
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
