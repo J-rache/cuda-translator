@@ -2,7 +2,7 @@
 
 A free-standing app that translates CUDA binaries into artifacts any other
 application can use — and proves the translation numerically on a real,
-non-NVIDIA GPU.
+non-NVIDIA GPUs.
 
 ```
 CUDA container (PTX / fatbin / cubin / PE host binary)
@@ -26,7 +26,7 @@ are in [docs/ground-truth.md](docs/ground-truth.md).
 | PE scanner | finds both embedded fatbins in a real nvcc-built host exe; the 4928-byte one is byte-identical to `nvcc -fatbin` output |
 | ELF cubin parser | `e_machine`/`e_flags` read from real bytes; `sm_50…sm_90` cubins all decode `sm_NN` + both entry symbols |
 | PTX frontend | zero diagnostics on nvcc **and** NVRTC output (two independent NVIDIA compilers); pointer params and per-load address provenance fully resolved |
-| OpenCL backend | output **compiled and executed by the Intel OpenCL runtime** (Iris Xe, 96 EUs) — cross-vendor |
+| OpenCL backend | output **compiled and executed by two independent non-NVIDIA OpenCL stacks**: Intel Iris Xe (96 reported OpenCL CUs) and AMD gfx90c (8 reported OpenCL CUs) |
 | Numeric acceptance | `vector_add` **1024/1024 bit-exact**; `saxpy` **1024/1024 bit-exact vs the fused-FMA oracle** (nvcc emits `fma.rn.f32`), and provably *not* unfused |
 | FMA oracles | exact integer-arithmetic `fma.rn.f32` matches native `fmaf` on 300k random triples; fused≠unfused on ~25% of triples (real discriminating inputs) |
 | Differential semantics | same source, `-fmad=false` build: 0 `fma` ops in PTX, interpreter matches the **unfused** oracle 1024/1024 — the tool preserves each binary's own float contract |
@@ -111,16 +111,17 @@ print(out["not_translated"])     # refused kernels, with reasons
   full matrix in docs/ground-truth.md) — not claimed as NVIDIA's formal
   universal encoding.
 * `verify` is honest about hardware: **NO-DEVICE** verdict if no OpenCL
-  runtime is present — never a fabricated pass.
+  runtime is present — never a fabricated pass. Device execution has been
+  verified bit-exact on both Intel and AMD OpenCL runtimes.
 
 ## Layout
 
 ```
-cuda_translator/      the app: ptx, ir, opencl, fatbin, elf, pe,
-                      interpreter, numeric_oracles, pipeline, verify,
-                      cli, rest, mcp_server
-scripts/              opencl_runner (ctypes ICD), verify_numeric driver
-tests/                unittest suite (23 tests) + MCP smoke client
+cuda_translator/      the app: ptx, ir, opencl, opencl_runner, fatbin,
+                      elf, pe, interpreter, numeric_oracles, pipeline,
+                      verify, cli, rest, mcp_server
+scripts/              checkout compatibility wrapper + verify_numeric driver
+tests/                unittest suite (25 tests) + MCP smoke client
 tools/                NVRTC PTX generator (second compiler path)
 examples/             .cu sources + NVIDIA-generated proof artifacts
 docs/ground-truth.md  how every fixture was made + oracle commands
