@@ -81,6 +81,8 @@ python cuda-translator.py mcp
 
 `python cuda-translator.py mcp` speaks MCP 2024-11-05 over stdio:
 
+* `health` — `{}` cheap service/device readiness
+* `device_info` — `{}` detected OpenCL target provenance
 * `analyze` — `{"input_b64": ...}` structural report
 * `translate` — `{"input_b64": ...}` OpenCL C (fail-closed → `isError`)
 * `translate_text` — `{"ptx": ...}`

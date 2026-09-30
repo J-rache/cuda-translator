@@ -3,11 +3,12 @@
 Transport: newline-delimited JSON-RPC on stdin/stdout (the MCP stdio
 convention). Implements initialize, tools/list, tools/call, and ping.
 Tools:
+    health()                   cheap service/device readiness report
+    device_info()              OpenCL target provenance for inspection
     analyze(input_b64)         structural report for a CUDA artifact
     translate(input_b64)       fail-closed OpenCL C translation
     translate_text(ptx)        translate PTX text directly
     verify_numeric()           run the numeric acceptance seam
-    list_tools()               self-description helper for humans
 Binary payloads use base64 (MCP tools exchange JSON).
 """
 from __future__ import annotations
@@ -21,6 +22,16 @@ from ._meta import VERSION, SERVER_NAME, MCP_PROTOCOL_VERSION
 from ._meta import InputError, TranslationError
 
 TOOLS = [
+    {
+        "name": "health",
+        "description": "Cheap readiness report for the translator service and detected OpenCL target.",
+        "inputSchema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "device_info",
+        "description": "Inspect detected OpenCL target provenance without executing a translated kernel.",
+        "inputSchema": {"type": "object", "properties": {}},
+    },
     {
         "name": "analyze",
         "description": "Structural analysis of a CUDA artifact (PTX text, "
@@ -64,6 +75,24 @@ TOOLS = [
 
 
 def _tool_call(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
+    if name == "health":
+        from . import opencl_runner
+        try:
+            cl, info, _, _ = opencl_runner.first_device()
+            device = "none" if cl is None else f"{info.platform} / {info.device}"
+            return {"status": "ok", "service": SERVER_NAME, "version": VERSION,
+                    "opencl_device": device}
+        except Exception as e:
+            return {"status": "degraded", "service": SERVER_NAME, "version": VERSION,
+                    "opencl_device": "probe-failed", "detail": str(e)}
+    if name == "device_info":
+        from . import opencl_runner
+        cl, info, _, _ = opencl_runner.first_device()
+        if cl is None:
+            return {"status": "no-device", "service": SERVER_NAME, "version": VERSION}
+        return {"status": "ok", "service": SERVER_NAME, "version": VERSION,
+                "platform": info.platform, "device": info.device,
+                "driver": info.driver, "compute_units": info.compute_units}
     if name == "analyze":
         data = base64.b64decode(args["input_b64"])
         from .pipeline import analyze_input

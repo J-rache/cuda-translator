@@ -1,5 +1,6 @@
 """MCP stdio smoke client: exercises initialize, tools/list, tools/call
-(translate_text good + fail-closed, analyze fatbin, verify_numeric).
+(health/device provenance, translate_text good + fail-closed, analyze fatbin,
+verify_numeric).
 
 Notification-aware: notifications produce no response, so the client tracks
 pending request ids and reads with a timeout instead of blocking forever.
@@ -62,7 +63,20 @@ def main() -> int:
     r = rpc({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}})
     names = [t["name"] for t in r["result"]["tools"]]
     print("tools:", names)
-    assert set(names) >= {"analyze", "translate", "translate_text", "verify_numeric"}
+    assert set(names) >= {"health", "device_info", "analyze", "translate",
+                          "translate_text", "verify_numeric"}
+
+    r = rpc({"jsonrpc": "2.0", "id": 30, "method": "tools/call", "params": {
+        "name": "health", "arguments": {}}})
+    payload = json.loads(r["result"]["content"][0]["text"])
+    print("health ->", payload)
+    assert payload["status"] == "ok"
+
+    r = rpc({"jsonrpc": "2.0", "id": 31, "method": "tools/call", "params": {
+        "name": "device_info", "arguments": {}}})
+    payload = json.loads(r["result"]["content"][0]["text"])
+    print("device_info ->", payload)
+    assert payload["status"] in {"ok", "no-device"}
 
     hist = open("examples/artifacts/histogram_sm75.ptx", "rb").read().decode()
     r = rpc({"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {
