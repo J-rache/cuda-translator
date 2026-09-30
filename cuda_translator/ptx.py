@@ -33,7 +33,7 @@ from .ir import (
 _TOKEN_RE = re.compile(
     r"""
     (?P<ws>\s+)
-  | (?P<float>0[fFdD][0-9A-Fa-f]{8}|\d+\.\d+(?:[eE][+-]?\d+)?|\.\d+)
+  | (?P<float>0[fF][0-9A-Fa-f]{8}|0[dD][0-9A-Fa-f]{16}|\d+\.\d+(?:[eE][+-]?\d+)?|\.\d+)
   | (?P<hex>0[xX][0-9A-Fa-f]+)
   | (?P<num>\d+)
   | (?P<directive>\.[A-Za-z_][\w.]*)
@@ -80,6 +80,8 @@ OP_MAP: Dict[str, Optional[str]] = {
     "mul": "mul",
     "mad": "mad",
     "fma": "fma",
+    "div": "div",
+    "bar": "barrier",
     "setp": "setp",
     "bra": "bra",
     "ret": "ret",
@@ -124,6 +126,7 @@ class _Parser:
         self.ptx_version: Optional[Tuple[int, int]] = None
         self.target: Optional[str] = None
         self.address_size: Optional[int] = None
+        self.dynamic_shared_symbols: List[str] = []
 
     # -- token helpers
     def peek(self, ahead: int = 0) -> Optional[str]:
@@ -177,11 +180,58 @@ class _Parser:
             elif tok in (".file", ".section", ".loc"):
                 self.next()
                 self._end_statement()
+            elif tok == ".extern":
+                self._parse_extern_directive()
             else:
                 self.next()
                 self.diag("warning", f"skipped top-level directive {tok!r}")
                 self._end_statement()
         return kernels
+
+    def _parse_extern_directive(self) -> None:
+        """Capture unsized .extern .shared declarations.
+
+        Numba emits dynamic shared memory as:
+          .extern .shared .align 8 .b8 SYMBOL[];
+        CUDA gives all such unsized extern shared symbols the launch-provided
+        dynamic shared-memory base. Other extern forms remain inspection-only.
+        """
+        start_line = self.line()
+        self.expect(".extern")
+        tokens: List[str] = []
+        while self.peek() is not None and self.peek() != ";":
+            # Do not consume the next source line if a malformed directive is
+            # missing its semicolon.
+            if self.i > 0 and self.lines[self.i] > start_line:
+                break
+            tokens.append(self.next())
+        if self.peek() == ";":
+            self.next()
+
+        if ".shared" not in tokens:
+            self.diag("warning", "skipped top-level directive '.extern'")
+            return
+
+        symbol: Optional[str] = None
+        unsized = False
+        for idx, tok in enumerate(tokens):
+            if re.fullmatch(r"[$A-Za-z_][\w$.]*", tok):
+                # .shared/.align/.b8 are directives and cannot match because
+                # they begin with '.', so the last identifier is the symbol.
+                symbol = tok
+            if tok == "[" and idx + 1 < len(tokens) and tokens[idx + 1] == "]":
+                unsized = True
+
+        if not symbol or not unsized:
+            self.diag(
+                "error",
+                "only unsized extern shared declarations are supported",
+                opcode=".extern.shared",
+            )
+            return
+
+        if symbol not in self.dynamic_shared_symbols:
+            self.dynamic_shared_symbols.append(symbol)
 
     def _end_statement(self) -> None:
         # PTX top-level directives end at newline OR ';'. Stop when the next
@@ -206,7 +256,11 @@ class _Parser:
         if kind not in (".entry", ".func"):
             raise InputError(f"expected .entry/.func, got {kind!r}")
         name = self.next()
-        kernel = Kernel(name=name, source="ptx")
+        kernel = Kernel(
+            name=name,
+            source="ptx",
+            dynamic_shared_symbols=list(self.dynamic_shared_symbols),
+        )
         if kind == ".func":
             self.diag("warning",
                       ".func (device function) parsed for inspection only; "
@@ -351,15 +405,22 @@ class _Parser:
         inst.mods.extend(kept_mods)
 
         if base in ("ld", "st"):
-            if house_op in ("ld", "st"):
-                # default space when none written
-                space = space or ("param" if base == "ld" else None)
             if house_op == "ld" and space == "param":
                 inst.op = "ld_param"
             elif house_op == "ld" and space == "global":
                 inst.op = "ld_global"
             elif house_op == "st" and space == "global":
                 inst.op = "st_global"
+            elif house_op == "ld" and space == "shared":
+                inst.op = "ld_shared"
+            elif house_op == "st" and space == "shared":
+                inst.op = "st_shared"
+            elif house_op == "ld" and space is None:
+                # PTX generic-address load. Address-space provenance is
+                # resolved after the full instruction stream is parsed.
+                inst.op = "ld_generic"
+            elif house_op == "st" and space is None:
+                inst.op = "st_generic"
             elif house_op in ("ld", "st"):
                 self.diag("error",
                           f"{space or 'default'} memory space unsupported",
@@ -384,13 +445,16 @@ class _Parser:
     def _assign_operands(self, inst: Instruction, operands: List[Operand],
                          opcode_tok: str) -> None:
         op = inst.op
-        if op == "st_global":
+        if op in ("st_global", "st_shared", "st_generic"):
             if operands and operands[0].kind == "mem":
                 inst.dests = [operands[0]]
                 inst.srcs = operands[1:]
             else:
                 self.diag("error", "st without memory destination", opcode=opcode_tok)
                 inst.dests, inst.srcs = [], operands
+            return
+        if op == "barrier":
+            inst.srcs = operands
             return
         if op == "bra":
             if operands and operands[0].kind in ("label", "sym"):
@@ -432,9 +496,13 @@ class _Parser:
                 return Operand(kind="not", name=inner.name, dtype=inner.dtype)
             return inner
         self.next()
-        if re.fullmatch(r"0[fFdD][0-9A-Fa-f]{8}", tok):
+        if re.fullmatch(r"0[fF][0-9A-Fa-f]{8}", tok):
             bits = int(tok[2:], 16)
             val = _struct.unpack("<f", _struct.pack("<I", bits))[0]
+            return Operand(kind="imm", name=repr(val))
+        if re.fullmatch(r"0[dD][0-9A-Fa-f]{16}", tok):
+            bits = int(tok[2:], 16)
+            val = _struct.unpack("<d", _struct.pack("<Q", bits))[0]
             return Operand(kind="imm", name=repr(val))
         if re.fullmatch(r"\d+\.\d+(?:[eE][+-]?\d+)?|\.\d+", tok):
             return Operand(kind="imm", name=repr(float(tok)))
@@ -520,8 +588,49 @@ def resolve_addresses(kernel: Kernel) -> int:
                 base[dest] = base[b.name]
             elif a.name in base and b.name in base:
                 pass  # two pointers: not resolvable here, leave raw
-        elif op in ("ld_global", "st_global") and inst.addr is None:
-            mem = inst.dests[0] if op == "st_global" else (
+            elif (
+                a.name in base
+                and b.kind in ("reg", "special")
+            ):
+                # Generic CUDA/NVVM byte addressing: a proven global base
+                # pointer plus an arbitrary integer byte-offset register.
+                # More-specific scaled-offset cases above take precedence.
+                addr[dest] = (
+                    base[a.name],
+                    b,
+                    1,
+                    0,
+                )
+            elif (
+                b.name in base
+                and a.kind in ("reg", "special")
+            ):
+                addr[dest] = (
+                    base[b.name],
+                    a,
+                    1,
+                    0,
+                )
+        elif op in ("ld_shared", "st_shared") and inst.addr is None:
+            mem = inst.dests[0] if op == "st_shared" else (
+                inst.srcs[0] if inst.srcs else None)
+            if mem is not None and mem.kind == "mem":
+                reg = mem.name
+                const = 0
+                m = re.fullmatch(r"(%[\w$.%]+)([+-]\d+)", reg)
+                if m:
+                    reg, const = m.group(1), int(m.group(2))
+                inst.addr = Address(
+                    space="shared",
+                    raw_reg=reg,
+                    const=const,
+                )
+                resolved += 1
+        elif op in (
+            "ld_global", "st_global", "ld_generic", "st_generic"
+        ) and inst.addr is None:
+            is_store = op in ("st_global", "st_generic")
+            mem = inst.dests[0] if is_store else (
                 inst.srcs[0] if inst.srcs else None)
             if mem is not None and mem.kind == "mem":
                 reg = mem.name
@@ -533,10 +642,19 @@ def resolve_addresses(kernel: Kernel) -> int:
                     p, idx, scale, c = addr[reg]
                     inst.addr = Address(space="global", base_param=p,
                                         index=idx, scale=scale, const=const + c)
+                    if op == "ld_generic":
+                        inst.op = "ld_global"
+                    elif op == "st_generic":
+                        inst.op = "st_global"
                     resolved += 1
                 elif reg in base:
                     inst.addr = Address(space="global", base_param=base[reg],
                                         raw_reg=reg)
+                    if op == "ld_generic":
+                        inst.op = "ld_global"
+                    elif op == "st_generic":
+                        inst.op = "st_global"
+                    resolved += 1
                 elif reg in off:
                     idx, scale = off[reg]
                     inst.addr = Address(space="global", index=idx, scale=scale,
@@ -556,9 +674,15 @@ def resolve_addresses(kernel: Kernel) -> int:
 
 
 def _resolve_param_pointeriness(kernels: List[Kernel]) -> None:
-    """Mark params as pointers when a global ld/st resolves to them (rule 4)."""
+    """Resolve generic memory and mark proven global pointer parameters."""
     for kernel in kernels:
         resolve_addresses(kernel)
+        for inst in kernel.body:
+            if inst.op in ("ld_generic", "st_generic"):
+                inst.comment = (
+                    "generic memory address space could not be proven"
+                )
+                inst.op = "unsupported"
         pointed: Dict[str, int] = {}
         for inst in kernel.body:
             a = inst.addr

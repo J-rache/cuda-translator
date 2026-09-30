@@ -133,3 +133,27 @@ backend by construction). The *final* numeric judge is the independent
 exact-oracle compare against real device execution above. The interpreter
 rejects non-uniform launch geometry (global not divisible by local) instead
 of silently floor-dividing the range.
+
+
+## Large generated-kernel cross-vendor acceptance
+
+The small checked-in fixtures are complemented by a real Numba/NVVM
+application-kernel stress test. The source PTX is intentionally not bundled
+with the public fixture set.
+
+The exact artifact is 452,030 bytes / 6,785 lines, targets `sm_52`, and has
+SHA-256
+`df1ca5f1c631b11c767f42f7fd3f1329739d1a2c13e8bfebc78f84a4581d3f30`.
+It exercises dynamic extern shared memory, `bar.sync 0`, FP64
+round-to-nearest division, mixed-width global accesses, narrow signed
+comparison semantics and direct backward-loop control flow.
+
+A captured real NVIDIA GTX 970 CUDA launch (2 blocks x 9 threads, 432 bytes
+dynamic shared memory, 16 RK4 slices) was reconstructed from the 180 PTX
+parameters and replayed through the translated OpenCL C on AMD `gfx90c`.
+Every input, mutated scratch buffer and formal output was byte-identical;
+all floating comparisons had max absolute difference 0.0.
+
+Full failure-to-proof history, hardware details and the narrow signed
+`ld.s8` / `setp.s16` bug found by the differential run are recorded in
+[house-field-crossvendor-20260929.md](house-field-crossvendor-20260929.md).

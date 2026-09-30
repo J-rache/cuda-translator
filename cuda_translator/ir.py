@@ -50,6 +50,7 @@ SPECIAL_REGS: Dict[str, str] = {
     "%nctaid.x": "num_groups_x",
     "%nctaid.y": "num_groups_y",
     "%nctaid.z": "num_groups_z",
+    "%dynamic_smem_size": "dynamic_shared_size",
 }
 
 
@@ -75,7 +76,7 @@ class Operand:
 class Address:
     """Resolved memory provenance for ld/st (IR rule 4)."""
 
-    space: str  # "global"
+    space: str  # "global" | "shared"
     base_param: Optional[str] = None  # kernel parameter owning the buffer
     index: Optional[Operand] = None  # element/byte index register
     scale: int = 1  # bytes per index unit (4 for f32 arrays)
@@ -155,6 +156,9 @@ class Kernel:
     registers: Dict[str, str] = field(default_factory=dict)  # name -> DECLARED storage type
     source: str = "ptx"  # provenance: "ptx" | "ptx-nvrtc" | synthetic...
     source_lines: List[str] = field(default_factory=list)  # original PTX text
+    # Unsized module-level .extern .shared symbols. CUDA aliases these to
+    # the launch-provided dynamic shared-memory region.
+    dynamic_shared_symbols: List[str] = field(default_factory=list)
 
     def reg_dtype(self, name: str) -> Optional[str]:
         """Declared STORAGE type of a register (not its per-use interpretation)."""

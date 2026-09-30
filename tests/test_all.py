@@ -125,6 +125,181 @@ class TestBackendSemantics(unittest.TestCase):
         self.assertIn("(__global uchar const *)(p_vector_add_param_1)) + ((size_t)(r__r1) * (4))",
                       src)
 
+    def test_selp_uses_predicate_as_fourth_ptx_operand(self):
+        source_ptx = r"""
+.version 7.8
+.target sm_52
+.address_size 64
+.visible .entry selp_test(
+    .param .u64 out
+)
+{
+    .reg .pred %p<2>;
+    .reg .b32 %r<4>;
+    .reg .b64 %rd<3>;
+    ld.param.u64 %rd1, [out];
+    cvta.to.global.u64 %rd2, %rd1;
+    mov.u32 %r1, 11;
+    mov.u32 %r2, 22;
+    setp.eq.u32 %p1, %r1, 11;
+    selp.u32 %r3, %r1, %r2, %p1;
+    st.global.u32 [%rd2], %r3;
+    ret;
+}
+"""
+        result = ptx.parse_ptx(source_ptx)
+        src = emit_program(result)[1]["selp_test"]
+        self.assertIn("r__p1", src)
+        self.assertIn("? ((uint)(r__r1)) : ((uint)(r__r2))", src)
+
+    def test_fp_neg_and_pred_not_preserve_ptx_types(self):
+        source_ptx = r"""
+.version 7.8
+.target sm_52
+.address_size 64
+.visible .entry unary_test(
+    .param .u64 out
+)
+{
+    .reg .pred %p<3>;
+    .reg .f64 %fd<3>;
+    .reg .b64 %rd<3>;
+    ld.param.u64 %rd1, [out];
+    cvta.to.global.u64 %rd2, %rd1;
+    mov.f64 %fd1, 0d3ff0000000000000;
+    neg.f64 %fd2, %fd1;
+    setp.eq.f64 %p1, %fd1, %fd1;
+    not.pred %p2, %p1;
+    st.global.f64 [%rd2], %fd2;
+    ret;
+}
+"""
+        result = ptx.parse_ptx(source_ptx)
+        src = emit_program(result)[1]["unary_test"]
+        self.assertIn("-((double)(r__fd1))", src)
+        self.assertIn("!((uchar)(r__p1))", src)
+        self.assertNotIn("-((uint)(r__fd1))", src)
+
+    def test_setp_s16_reinterprets_b16_storage_signed(self):
+        source_ptx = r"""
+.version 7.8
+.target sm_52
+.address_size 64
+.visible .entry signed_edge(
+    .param .u64 p
+)
+{
+    .reg .b64 %rd<3>;
+    .reg .b16 %rs<2>;
+    .reg .pred %p<2>;
+    ld.param.u64 %rd1, [p];
+    cvta.to.global.u64 %rd2, %rd1;
+    ld.global.s8 %rs1, [%rd2];
+    setp.gt.s16 %p1, %rs1, 0;
+    ret;
+}
+"""
+        k = ptx.parse_ptx(source_ptx).kernels[0]
+        out = emit_kernel(k)
+        self.assertIn("((short)(r__rs1)) > ((short)(0))", out)
+
+
+    def test_setp_leu_float_includes_unordered_nan_case(self):
+        source_ptx = r"""
+.version 7.8
+.target sm_52
+.address_size 64
+.visible .entry cmp_test(
+    .param .u64 out
+)
+{
+    .reg .pred %p<2>;
+    .reg .f64 %fd<3>;
+    .reg .b64 %rd<3>;
+    ld.param.u64 %rd1, [out];
+    cvta.to.global.u64 %rd2, %rd1;
+    mov.f64 %fd1, 0d0000000000000000;
+    mov.f64 %fd2, 0d3ff0000000000000;
+    setp.leu.f64 %p1, %fd1, %fd2;
+    ret;
+}
+"""
+        result = ptx.parse_ptx(source_ptx)
+        src = emit_program(result)[1]["cmp_test"]
+        self.assertIn("isnan(", src)
+        self.assertIn("<=", src)
+
+    def test_cvt_preserves_source_signedness_and_width(self):
+        source_ptx = r"""
+.version 7.8
+.target sm_52
+.address_size 64
+.visible .entry cvt_test(
+    .param .u64 out
+)
+{
+    .reg .b32 %r<3>;
+    .reg .b64 %rd<4>;
+    .reg .f64 %fd<2>;
+    ld.param.u64 %rd1, [out];
+    cvta.to.global.u64 %rd2, %rd1;
+    mov.u32 %r1, 4294967295;
+    cvt.s64.s32 %rd3, %r1;
+    cvt.rn.f64.s64 %fd1, %rd3;
+    st.global.f64 [%rd2], %fd1;
+    ret;
+}
+"""
+        result = ptx.parse_ptx(source_ptx)
+        src = emit_program(result)[1]["cvt_test"]
+        self.assertIn("((int)(r__r1))", src)
+        self.assertIn("((long)(r__rd3))", src)
+        self.assertIn("((double)", src)
+
+    def test_bar_sync_fences_local_and_global_memory(self):
+        source_ptx = r"""
+.version 7.8
+.target sm_52
+.address_size 64
+.visible .entry barrier_test()
+{
+    bar.sync 0;
+    ret;
+}
+"""
+        result = ptx.parse_ptx(source_ptx)
+        src = emit_program(result)[1]["barrier_test"]
+        self.assertIn(
+            "CLK_LOCAL_MEM_FENCE | CLK_GLOBAL_MEM_FENCE",
+            src,
+        )
+
+    def test_mixed_width_global_access_uses_instruction_width(self):
+        source_ptx = r"""
+.version 7.8
+.target sm_52
+.address_size 64
+.visible .entry mixed_width(
+    .param .u64 p
+)
+{
+    .reg .b64 %rd<3>;
+    .reg .u64 %r<2>;
+    .reg .f64 %fd<2>;
+    ld.param.u64 %rd1, [p];
+    cvta.to.global.u64 %rd2, %rd1;
+    ld.global.u64 %r1, [%rd2];
+    ld.global.f64 %fd1, [%rd2];
+    ret;
+}
+"""
+        k = ptx.parse_ptx(source_ptx).kernels[0]
+        out = emit_kernel(k)
+        self.assertIn("__global uchar* restrict", out)
+        self.assertIn("__global ulong const *", out)
+        self.assertIn("__global double const *", out)
+
+
     def test_fma_lowered_to_opencl_fma(self):
         src = emit_kernel([k for k in self.res.kernels if k.name == "saxpy"][0])
         self.assertIn("fma(", src)

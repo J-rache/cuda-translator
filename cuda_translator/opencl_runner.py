@@ -206,12 +206,14 @@ def make_context_and_queue(cl: _CL, plat: int, dev: int):
 def run_ndrange(cl: _CL, ctx: int, q: int, source: str,
                 kernel_name: str, args: List[Any],
                 out_indices: List[int],
-                global_size: Tuple[int, ...], dev: Optional[int] = None) -> Dict[str, bytes]:
+                global_size: Tuple[int, ...], dev: Optional[int] = None,
+                local_size: Optional[Tuple[int, ...]] = None) -> Dict[str, bytes]:
     """Compile + set args (in kernel DECLARATION order) + run + read back.
 
     args: ordered list. Each item is bytes (pointer buffer, becomes a
-    cl_mem arg) or (dtype, value) tuple (scalar arg). The ORDER MUST MATCH
-    the kernel parameter declaration order exactly.
+    cl_mem arg), (dtype, value) tuple (scalar arg), or ("local", size_bytes)
+    for a dynamic __local argument. The ORDER MUST MATCH the kernel parameter
+    declaration order exactly.
     out_indices: positions in `args` (of the bytes items) to read back.
     Returns {"<arg position>": bytes}.
     """
@@ -240,14 +242,36 @@ def run_ndrange(cl: _CL, ctx: int, q: int, source: str,
                                           ctypes.byref(memref)), f"SetKernelArg[{idx}]")
         else:
             dtype, value = item
-            t = _SCALAR_CTYPES[dtype]
-            v = t(value)
-            cl._chk(cl.lib.clSetKernelArg(kern, idx, ctypes.sizeof(t),
-                                          ctypes.byref(v)), f"SetKernelArg[{idx}]")
+            if dtype == "local":
+                size = int(value)
+                cl._chk(
+                    cl.lib.clSetKernelArg(
+                        kern,
+                        idx,
+                        size,
+                        None,
+                    ),
+                    f"SetKernelArg[{idx}] local",
+                )
+            else:
+                t = _SCALAR_CTYPES[dtype]
+                v = t(value)
+                cl._chk(cl.lib.clSetKernelArg(kern, idx, ctypes.sizeof(t),
+                                              ctypes.byref(v)), f"SetKernelArg[{idx}]")
 
     gdim = len(global_size)
     gsz = (ctypes.c_size_t * gdim)(*global_size)
-    rc = cl.lib.clEnqueueNDRangeKernel(q, kern, gdim, None, gsz, None, 0, None, None)
+    lsz = None
+    if local_size is not None:
+        if len(local_size) != gdim:
+            raise ValueError("local_size dimensionality must match global_size")
+        for g, l in zip(global_size, local_size):
+            if l <= 0 or g % l != 0:
+                raise ValueError(
+                    f"global size {g} must be divisible by local size {l}"
+                )
+        lsz = (ctypes.c_size_t * gdim)(*local_size)
+    rc = cl.lib.clEnqueueNDRangeKernel(q, kern, gdim, None, gsz, lsz, 0, None, None)
     cl._chk(rc, "EnqueueNDRangeKernel")
     cl._chk(cl.lib.clFinish(q), "Finish")
 

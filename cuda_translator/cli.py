@@ -10,8 +10,10 @@ Subcommands:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
+import re
 import sys
 
 from ._meta import VERSION, DEFAULT_REST_PORT, InputError, TranslationError
@@ -34,6 +36,15 @@ def cmd_analyze(args) -> int:
     return 0
 
 
+def _kernel_output_filename(name: str) -> str:
+    """Stable Windows-safe filename; kernel symbol in source is unchanged."""
+    clean = re.sub(r"[^A-Za-z0-9_.-]", "_", name)
+    if len(clean) <= 96:
+        return clean + ".cl"
+    digest = hashlib.sha256(name.encode("utf-8")).hexdigest()[:16]
+    return clean[:64] + "-" + digest + ".cl"
+
+
 def cmd_translate(args) -> int:
     from .pipeline import translate_input
     data = _read(args.file)
@@ -49,8 +60,9 @@ def cmd_translate(args) -> int:
     }
     if args.out:
         os.makedirs(args.out, exist_ok=True)
+        payload["written"] = []
         for name, src in result["kernels"].items():
-            path = os.path.join(args.out, f"{name}.cl")
+            path = os.path.join(args.out, _kernel_output_filename(name))
             with open(path, "w", encoding="utf-8") as f:
                 f.write(result["opencl_header"] + "\n" + src + "\n")
             payload.setdefault("written", []).append(path)

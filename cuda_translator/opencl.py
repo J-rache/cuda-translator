@@ -62,6 +62,7 @@ SPECIAL_OCL = {
     "num_groups_x": "get_num_groups(0)",
     "num_groups_y": "get_num_groups(1)",
     "num_groups_z": "get_num_groups(2)",
+    "dynamic_shared_size": "__house_dynamic_shared_size",
 }
 
 _CMP_C = {
@@ -70,7 +71,13 @@ _CMP_C = {
     "gtu": ">", "geu": ">=",
 }
 
-_MEM_TYPES = ("f32", "f64", "u32", "s32", "b32", "u64", "s64", "b64")
+_MEM_TYPES = (
+    "f32", "f64",
+    "u8", "s8", "b8",
+    "u16", "s16", "b16",
+    "u32", "s32", "b32",
+    "u64", "s64", "b64",
+)
 
 
 class TranslationAbort(TranslationError):
@@ -127,16 +134,33 @@ class _Emitter:
         if o.kind == "special":
             return _cast(want, self.special(o.name))
         if o.kind in ("neg", "not"):
-            inner = Operand(kind="reg", name=o.name, dtype=o.dtype)
+            if o.name in self.k.registers:
+                inner_kind = "reg"
+            elif o.name in SPECIAL_OCL:
+                inner_kind = "special"
+            else:
+                inner_kind = "imm"
+            inner = Operand(
+                kind=inner_kind,
+                name=o.name,
+                dtype=o.dtype,
+            )
             u = "-" if o.kind == "neg" else "!"
-            return _cast(want, u + self.val(inst, inner, want))
+            return _cast(
+                want,
+                u + self.val(inst, inner, want),
+            )
         if o.kind == "mem":
             _fail(self.k, inst, f"unresolved memory operand {o.name!r}")
+        if o.kind == "sym" and o.name in self.k.dynamic_shared_symbols:
+            # CUDA aliases all unsized extern shared symbols to the
+            # launch-provided dynamic shared-memory base.
+            return _cast(want, "0UL")
         if o.kind in ("label", "sym"):
             _fail(self.k, inst, f"unexpected symbolic operand {o.name!r}")
         return _cast(want, self.cname(o.name))
 
-    def elem_ptr(self, a: Address, const: bool = True) -> str:
+    def elem_ptr(self, a: Address, width: str, const: bool = True) -> str:
         """Pointer to the addressed element via BYTE arithmetic.
 
         Address.scale is a BYTE stride, so the typed param pointer is cast to
@@ -147,7 +171,9 @@ class _Emitter:
         """
         if a.base_param is None:
             _fail(self.k, None, f"unresolved address (raw_reg={a.raw_reg!r})")
-        etype = self.elem_of.get(a.base_param, "uchar")
+        etype = STORAGE_C.get(width)
+        if etype is None:
+            _fail(self.k, None, f"global-memory width {width} not lowered")
         base = self.pname(a.base_param)  # the __global param pointer itself
         if a.index is None:
             off = str(a.const)
@@ -158,6 +184,21 @@ class _Emitter:
         kw = "const " if const else ""
         return (f"((__global {etype} {kw}*)"
                 f"(((__global uchar {kw}*)({base})) + ({off})))")
+
+    def shared_elem_ptr(self, a: Address, width: str) -> str:
+        """Pointer into launch-provided dynamic shared memory by byte offset."""
+        if a.space != "shared" or a.raw_reg is None:
+            _fail(self.k, None, "unresolved shared-memory address")
+        etype = STORAGE_C.get(width)
+        if etype is None:
+            _fail(self.k, None, f"shared-memory width {width} not lowered")
+        off = f"(size_t)({self.cname(a.raw_reg)})"
+        if a.const:
+            off += f" + ({a.const})"
+        return (
+            f"((__local {etype} *)"
+            f"(((__local uchar *)(__house_dynamic_shared)) + ({off})))"
+        )
 
     # ---- statements
     def stmt(self, inst: Instruction) -> List[str]:
@@ -181,7 +222,7 @@ class _Emitter:
             if dt not in _MEM_TYPES:
                 _fail(self.k, inst, f"ld_global width {dt} not lowered")
             return [self.assign(d.name, _storage(self.k, d),
-                                f"*{self.elem_ptr(a)}")]
+                                f"*{self.elem_ptr(a, dt)}")]
         if op == "st_global":
             a = inst.addr
             if a is None:
@@ -191,8 +232,47 @@ class _Emitter:
                 _fail(self.k, inst, f"st_global width {dt} not lowered")
             etype = STORAGE_C[dt]
             v = self.val(inst, inst.srcs[0], etype)
-            return [f"*{self.elem_ptr(a, const=False)} = {v};"]
-        if op in ("add", "sub", "mul", "mad", "fma"):
+            return [f"*{self.elem_ptr(a, dt, const=False)} = {v};"]
+        if op == "ld_shared":
+            d = inst.dests[0]
+            a = inst.addr
+            if a is None:
+                _fail(self.k, inst, "ld_shared without resolved address")
+            dt = inst.width or "b32"
+            if dt not in _MEM_TYPES:
+                _fail(self.k, inst, f"ld_shared width {dt} not lowered")
+            return [
+                self.assign(
+                    d.name,
+                    _storage(self.k, d),
+                    f"*{self.shared_elem_ptr(a, dt)}",
+                )
+            ]
+        if op == "st_shared":
+            a = inst.addr
+            if a is None:
+                _fail(self.k, inst, "st_shared without resolved address")
+            dt = inst.width or "b32"
+            if dt not in _MEM_TYPES:
+                _fail(self.k, inst, f"st_shared width {dt} not lowered")
+            etype = STORAGE_C[dt]
+            v = self.val(inst, inst.srcs[0], etype)
+            return [
+                f"*{self.shared_elem_ptr(a, dt)} = {v};"
+            ]
+        if op == "barrier":
+            if "sync" not in inst.mods:
+                _fail(self.k, inst, "only bar.sync is lowered")
+            if (
+                len(inst.srcs) != 1
+                or inst.srcs[0].kind != "imm"
+                or inst.srcs[0].name != "0"
+            ):
+                _fail(self.k, inst, "only bar.sync 0 is lowered")
+            return [
+                "barrier(CLK_LOCAL_MEM_FENCE | CLK_GLOBAL_MEM_FENCE);"
+            ]
+        if op in ("add", "sub", "mul", "div", "mad", "fma"):
             return self._arith(inst)
         if op == "setp":
             return [self._setp(inst)]
@@ -201,10 +281,35 @@ class _Emitter:
             return [self.assign(d.name, _storage(self.k, d),
                                 self.val(inst, s, "ulong"))]
         if op == "cvt":
-            d, s = inst.dests[0], inst.srcs[0]
-            dt = INTERP_C.get(inst.width or "b32", "uint")
-            return [self.assign(d.name, _storage(self.k, d),
-                                _cast(dt, self.val(inst, s)))]
+            d, src = inst.dests[0], inst.srcs[0]
+            dst_type = INTERP_C.get(
+                inst.width or "b32",
+                "uint",
+            )
+            source_width = None
+            for mod in reversed(inst.mods):
+                if mod in INTERP_C:
+                    source_width = mod
+                    break
+            if source_width is None:
+                _fail(
+                    self.k,
+                    inst,
+                    "cvt source type is not explicit",
+                )
+            src_type = INTERP_C[source_width]
+            src_value = self.val(
+                inst,
+                src,
+                src_type,
+            )
+            return [
+                self.assign(
+                    d.name,
+                    _storage(self.k, d),
+                    _cast(dst_type, src_value),
+                )
+            ]
         if op in ("and", "or", "xor", "shl", "shr", "min", "max", "selp",
                   "not", "neg", "abs"):
             return self._bitwise(inst)
@@ -222,10 +327,41 @@ class _Emitter:
             _fail(self.k, inst, f"setp comparison {cmp_op!r} not lowered")
         d, a, b = inst.dests[0], inst.srcs[0], inst.srcs[1]
         it = _interp(self.k, inst)
-        if it not in ("int", "uint", "long", "ulong", "float", "double"):
+        if it not in (
+            "char", "uchar", "short", "ushort",
+            "int", "uint", "long", "ulong", "float", "double",
+        ):
             it = "int"
-        if cmp_op.endswith("u") and it in ("int", "long"):
-            uit = "uint" if it == "int" else "ulong"
+        if (
+            it in ("float", "double")
+            and cmp_op in ("equ", "neu", "ltu", "leu", "gtu", "geu")
+        ):
+            base_cmp = {
+                "equ": "==",
+                "neu": "!=",
+                "ltu": "<",
+                "leu": "<=",
+                "gtu": ">",
+                "geu": ">=",
+            }[cmp_op]
+            a_v = self.val(inst, a, it)
+            b_v = self.val(inst, b, it)
+            expr = (
+                f"(isnan({a_v}) || isnan({b_v}) || "
+                f"({a_v} {base_cmp} {b_v}))"
+            )
+            return self.assign(
+                d.name,
+                "uchar",
+                f"{expr} ? 1 : 0",
+            )
+        if cmp_op.endswith("u") and it in ("char", "short", "int", "long"):
+            uit = {
+                "char": "uchar",
+                "short": "ushort",
+                "int": "uint",
+                "long": "ulong",
+            }[it]
             a_v, b_v = self.val(inst, a, uit), self.val(inst, b, uit)
         else:
             a_v, b_v = self.val(inst, a, it), self.val(inst, b, it)
@@ -266,7 +402,7 @@ class _Emitter:
             av, bv, cv = (self.val(inst, s, ut) for s in (a, b, c))
             return [self.assign(d.name, dst, f"{av} * {bv} + {cv}")]
 
-        sym = {"add": "+", "sub": "-", "mul": "*"}[op]
+        sym = {"add": "+", "sub": "-", "mul": "*", "div": "/"}[op]
         it = _interp(k, inst)
         if it in ("int", "long"):
             ut = "uint" if it == "int" else "ulong"
@@ -300,39 +436,54 @@ class _Emitter:
             return [self.assign(d.name, dst,
                                 f"{op}({self.val(inst, a, it)}, {self.val(inst, b, it)})")]
         if op == "selp" and len(inst.srcs) == 3:
-            c, a, b = inst.srcs
+            # PTX: selp d, a, b, p => d = p ? a : b
+            a, b, c = inst.srcs
             return [self.assign(d.name, dst,
                                 f"({self.val(inst, c, 'uchar')} ? "
                                 f"{self.val(inst, a, it)} : {self.val(inst, b, it)})")]
         if op == "not" and len(inst.srcs) == 1:
+            if (inst.width or "") == "pred":
+                return [
+                    self.assign(
+                        d.name,
+                        dst,
+                        f"!{self.val(inst, inst.srcs[0], 'uchar')}",
+                    )
+                ]
             return [self.assign(d.name, dst, f"~{self.val(inst, inst.srcs[0], it)}")]
         if op == "neg" and len(inst.srcs) == 1:
+            raw_it = _interp(k, inst)
+            if raw_it in ("float", "double"):
+                it = raw_it
             return [self.assign(d.name, dst, f"-{self.val(inst, inst.srcs[0], it)}")]
         if op == "abs" and len(inst.srcs) == 1:
+            raw_it = _interp(k, inst)
+            if raw_it in ("float", "double"):
+                it = raw_it
+                return [
+                    self.assign(
+                        d.name,
+                        dst,
+                        f"fabs({self.val(inst, inst.srcs[0], it)})",
+                    )
+                ]
             return [self.assign(d.name, dst, f"abs({self.val(inst, inst.srcs[0], it)})")]
         _fail(k, inst, f"{op} shape not lowered")
         return []
 
 
-def _prove_structured(kernel: Kernel) -> None:
-    """Only lower the NVIDIA guard idiom; everything else fails closed."""
-    if not kernel.body:
-        return
-    for idx, inst in enumerate(kernel.body):
+def _prove_direct_cfg(kernel: Kernel) -> None:
+    """Prove direct PTX branches are representable as OpenCL C gotos.
+
+    Registers are declared at kernel scope before every label, so forward and
+    backward direct branches do not cross declarations. The PTX frontend
+    still fails closed on unsupported/indirect control-flow opcodes.
+    """
+    for inst in kernel.body:
         if inst.op != "bra":
             continue
-        if inst.pred is None:
-            _fail(kernel, inst, "unconditional bra is outside the proven guard idiom")
-        target = inst.label
-        if target not in kernel.labels:
-            _fail(kernel, inst, f"bra to unknown label {target!r}")
-        t_idx = kernel.labels[target]
-        if t_idx <= idx:
-            _fail(kernel, inst, "backward branch (loop) is outside the proven guard idiom")
-        for j in range(t_idx, len(kernel.body)):
-            if kernel.body[j].op != "ret":
-                _fail(kernel, kernel.body[j],
-                      "guard target label is followed by non-ret code")
+        if not inst.label or inst.label not in kernel.labels:
+            _fail(kernel, inst, f"bra to unknown label {inst.label!r}")
 
 
 def emit_kernel(kernel: Kernel, fail_closed: bool = True) -> str:
@@ -345,10 +496,21 @@ def emit_kernel(kernel: Kernel, fail_closed: bool = True) -> str:
                 f"kernel {kernel.name}: reachable unsupported instruction "
                 f"(opcode {inst.op}, PTX line {inst.line})",
                 kernel=kernel.name, opcode=inst.op, line=inst.line or 0)
-        _prove_structured(kernel)
+        _prove_direct_cfg(kernel)
 
     em = _Emitter(kernel)
-    lines: List[str] = [f"__kernel void {kernel.name}("]
+    uses_fp64 = (
+        any(dt == "f64" for dt in kernel.registers.values())
+        or any(p.dtype == "f64" for p in kernel.params)
+        or any(inst.width == "f64" for inst in kernel.body)
+    )
+    lines: List[str] = []
+    if uses_fp64:
+        lines.append("#pragma OPENCL EXTENSION cl_khr_fp64 : enable")
+    # PTX distinguishes explicit fma from separate mul/add instructions.
+    # Prevent the OpenCL compiler from silently contracting the latter.
+    lines.append("#pragma OPENCL FP_CONTRACT OFF")
+    lines.append(f"__kernel void {kernel.name}(")
     args: List[str] = []
     for p in kernel.params:
         if p.is_pointer:
@@ -363,6 +525,9 @@ def emit_kernel(kernel: Kernel, fail_closed: bool = True) -> str:
             args.append(f"    __global {et}* restrict {em.pname(p.name)}")
         else:
             args.append(f"    {STORAGE_C.get(p.dtype, 'ulong')} {em.pname(p.name)}")
+    if kernel.dynamic_shared_symbols:
+        args.append("    __local uchar* __house_dynamic_shared")
+        args.append("    ulong __house_dynamic_shared_size")
     lines.append(",\n".join(args))
     lines.append(") {")
     for name, dt in sorted(kernel.registers.items()):

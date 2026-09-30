@@ -5,6 +5,7 @@ build/
 dist/
 *.egg-info/
 .venv/
+.release-venv/
 
 # artifacts are proof fixtures: tracked, except generated intermediates
 examples/artifacts/oracle_scratch/
