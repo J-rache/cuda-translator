@@ -489,6 +489,10 @@ def _prove_direct_cfg(kernel: Kernel) -> None:
 def emit_kernel(kernel: Kernel, fail_closed: bool = True) -> str:
     """Emit one OpenCL C kernel. Fail closed by default (IR rule 1)."""
     if fail_closed:
+        # Prove branch targets before walking the CFG. Otherwise an unknown
+        # unconditional target can escape reachable_unsupported() as a raw
+        # ValueError instead of the public fail-closed TranslationError contract.
+        _prove_direct_cfg(kernel)
         bad = reachable_unsupported(kernel)
         if bad:
             inst = bad[0]
@@ -496,7 +500,6 @@ def emit_kernel(kernel: Kernel, fail_closed: bool = True) -> str:
                 f"kernel {kernel.name}: reachable unsupported instruction "
                 f"(opcode {inst.op}, PTX line {inst.line})",
                 kernel=kernel.name, opcode=inst.op, line=inst.line or 0)
-        _prove_direct_cfg(kernel)
 
     em = _Emitter(kernel)
     uses_fp64 = (

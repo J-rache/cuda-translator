@@ -1,10 +1,12 @@
 # cuda-translator
 
+[![CI](https://github.com/J-rache/cuda-translator/actions/workflows/ci.yml/badge.svg)](https://github.com/J-rache/cuda-translator/actions/workflows/ci.yml)
+
 A free-standing app that translates CUDA binaries into artifacts any other
 application can use — and proves the translation numerically on real,
 non-NVIDIA GPUs.
 
-**Status: v0.1.0 pre-release.** This is a deliberately bounded translator,
+**Status: v0.1.1 pre-release.** This is a deliberately bounded translator,
 not a drop-in replacement for the CUDA driver or a general SASS decompiler.
 Unsupported or unprovable semantics fail closed instead of emitting an
 approximate translation.
@@ -38,6 +40,9 @@ are in [docs/ground-truth.md](docs/ground-truth.md).
 | Fail-closed | `atomicAdd` kernel refused with exact opcode + PTX line; REST returns **HTTP 422**, MCP returns `isError: true`; nothing wrong-but-compiling is ever emitted |
 | Data-dependent CFG | `bin_classify` (nested guards from `&` of comparisons) parses and translates cleanly |
 | Real Numba/NVVM stress kernel | 452 KB / 6,785-line House Field PTX with dynamic shared memory, barriers, FP64 division and loops compiles on AMD `gfx90c`; captured NVIDIA CUDA launches replay **byte-identically for every input, scratch and output buffer** at 9, 128 and 256 nodes ([receipt](docs/house-field-crossvendor-20260929.md)) |
+| Public reproducible stress workload | Deterministic synthetic PTX regenerates from repo source and executes dynamic shared memory, bar.sync 0, FP32/FMA, FP64, loops and mixed-width signed accesses; AMD gfx90c output matched an independent CPU oracle byte-for-byte ([reproduction](docs/public-stress.md)) |
+
+See [docs/support-matrix.md](docs/support-matrix.md) for the explicit PROVEN / IMPLEMENTED-LIMITED / FAIL-CLOSED / OUT-OF-SCOPE boundary.
 
 ## Install
 
@@ -135,6 +140,10 @@ privilege and isolation. See [SECURITY.md](SECURITY.md).
 * `verify` is honest about hardware: **NO-DEVICE** verdict if no OpenCL
   runtime is present — never a fabricated pass. Device execution has been
   verified bit-exact on both Intel and AMD OpenCL runtimes.
+* Public input parsing is bounded to 64 MiB per artifact/request; compressed
+  fatbin entries also have a 64 MiB decompressed-size cap and bounded entry
+  count. These resource bounds reduce obvious exhaustion paths; they are not
+  a sandbox.
 
 ## Layout
 
@@ -149,6 +158,8 @@ examples/             .cu sources + NVIDIA-generated proof artifacts
 docs/ground-truth.md  how every fixture was made + oracle commands
 docs/house-field-crossvendor-20260929.md
                       large real Numba/NVVM NVIDIA->AMD replay receipt
+docs/public-stress.md public deterministic stress workload + AMD receipt
+docs/support-matrix.md explicit semantic/proof boundary
 LICENSE               MIT license
 SECURITY.md            security boundary and reporting guidance
 THIRD_PARTY_NOTICES.md fixture/reference attributions

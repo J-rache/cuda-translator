@@ -15,7 +15,7 @@ from __future__ import annotations
 from typing import Any, Dict, Optional
 
 from . import fatbin as _fatbin, elf as _elf, pe as _pe
-from ._meta import InputError
+from ._meta import InputError, ensure_input_size
 from .ir import TranslationResult
 from .opencl import emit_program, emit_kernel
 from .ptx import parse_ptx, ir_text
@@ -48,6 +48,7 @@ def detect_input(data: bytes) -> str:
 def analyze_input(data: bytes, name: str = "<input>") -> Dict[str, Any]:
     """Lossless analysis: parse, report, never raises for weird-but-parseable
     content (parse errors raise InputError)."""
+    ensure_input_size(data, name)
     kind = detect_input(data)
     report: Dict[str, Any] = {"input": name, "kind": kind, "diagnostics": []}
     if kind == "ptx":
@@ -145,6 +146,7 @@ def _report_from_translation_result(res: TranslationResult) -> Dict[str, Any]:
 def translate_input(data: bytes, name: str = "<input>",
                     kernel: Optional[str] = None) -> Dict[str, Any]:
     """Fail-closed translation to OpenCL C. Raises TranslationError."""
+    ensure_input_size(data, name)
     kind = detect_input(data)
     if kind == "pe":
         scan = _pe.scan(data)
@@ -189,12 +191,14 @@ def translate_input_strict(data: bytes, name: str = "<input>") -> Dict[str, Any]
     result = translate_input(data, name)
     if result["not_translated"]:
         first = result["not_translated"][0]
-        m = _re.search(r"kernel (\S+):.*?(opcode \S+, PTX line \d+|PTX line \d+)?",
-                       first)
-        kname = m.group(1) if m else ""
+        km = _re.search(r"kernel (\S+):", first)
+        om = _re.search(r"opcode ([^,\s]+), PTX line (\d+)", first)
+        kname = km.group(1) if km else ""
+        opcode = om.group(1) if om else ""
+        line = int(om.group(2)) if om else 0
         raise TranslationError(
             f"fail-closed: {len(result['not_translated'])} kernel(s) refused; "
-            f"{first}", kernel=kname)
+            f"{first}", kernel=kname, opcode=opcode, line=line)
     return result
 
 

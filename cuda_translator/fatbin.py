@@ -34,7 +34,10 @@ import struct
 from dataclasses import dataclass, field
 from typing import List, Optional
 
-from ._meta import InputError
+from ._meta import (
+    InputError, MAX_INPUT_BYTES, MAX_DECOMPRESSED_ENTRY_BYTES,
+    MAX_FATBIN_ENTRIES, ensure_input_size,
+)
 
 FATBIN_MAGIC = 0xBA55ED50
 KIND_PTX = 1
@@ -87,49 +90,77 @@ class Fatbin:
 
 
 def _decompress(input_: bytes, expected_size: int) -> bytes:
-    """NVIDIA fatbin LZ decoder (documented variant, see module docstring)."""
+    """NVIDIA fatbin LZ decoder with explicit allocation/stream bounds."""
+    if expected_size < 0 or expected_size > MAX_DECOMPRESSED_ENTRY_BYTES:
+        raise InputError(
+            f"fatbin decompressed size {expected_size} exceeds "
+            f"{MAX_DECOMPRESSED_ENTRY_BYTES}-byte limit"
+        )
+    if expected_size == 0:
+        return b""
+
     out = bytearray(expected_size + 64)
     ipos, opos = 0, 0
     isize = len(input_)
     while ipos < isize:
         if opos > expected_size:
             raise InputError("fatbin decompression overflow")
+
         nclen = (input_[ipos] & 0xF0) >> 4
         clen = 4 + (input_[ipos] & 0x0F)
         if nclen == 0x0F:
             while True:
                 ipos += 1
+                if ipos >= isize:
+                    raise InputError("fatbin decompression: truncated literal length")
                 nclen += input_[ipos]
                 if input_[ipos] != 0xFF:
                     break
         ipos += 1
         if ipos + nclen > isize:
             raise InputError("fatbin decompression: literal run past end")
+        if opos + nclen > expected_size:
+            raise InputError("fatbin decompression: literal run exceeds declared size")
         out[opos:opos + nclen] = input_[ipos:ipos + nclen]
         ipos += nclen
         opos += nclen
         if ipos >= isize or opos >= expected_size:
             break
+
+        if ipos + 2 > isize:
+            raise InputError("fatbin decompression: truncated back-reference")
         back = input_[ipos] + (input_[ipos + 1] << 8)
         ipos += 2
+        if back <= 0 or back > opos:
+            raise InputError("fatbin decompression: invalid back-reference")
         if clen == 0x0F + 4:
             while True:
-                clen += input_[ipos]
+                if ipos >= isize:
+                    raise InputError("fatbin decompression: truncated match length")
+                extra = input_[ipos]
+                clen += extra
                 ipos += 1
-                if input_[ipos - 1] != 0xFF:
+                if extra != 0xFF:
                     break
+        if opos + clen > expected_size:
+            raise InputError("fatbin decompression: match exceeds declared size")
         if clen <= back:
             out[opos:opos + clen] = out[opos - back:opos - back + clen]
         else:
-            # overlapping match: copy byte-by-byte
             for i in range(clen):
                 out[opos + i] = out[opos + i - back]
         opos += clen
+
+    if opos != expected_size:
+        raise InputError(
+            f"fatbin decompression size mismatch: expected {expected_size}, got {opos}"
+        )
     return bytes(out[:opos])
 
 
 def parse(data: bytes, strict: bool = False) -> Fatbin:
     """Parse a fatbin. strict=True raises when the magic is wrong."""
+    ensure_input_size(data, "fatbin")
     if len(data) < 16:
         raise InputError(f"fatbin too small: {len(data)} bytes")
     magic, version, header_size, size = struct.unpack_from("<IHHQ", data, 0)
@@ -137,10 +168,22 @@ def parse(data: bytes, strict: bool = False) -> Fatbin:
         raise InputError(f"bad fatbin magic 0x{magic:08x} (expected 0x{FATBIN_MAGIC:08x})")
     if strict and version != 1:
         raise InputError(f"unsupported fatbin version {version}")
+    if header_size < 16 or header_size > len(data):
+        raise InputError(f"invalid fatbin header size {header_size}")
     fb = Fatbin(total_size=len(data), size_field=size)
     off = header_size
     end = header_size + size
-    while off + 4 <= min(end, len(data)):
+    if end > len(data):
+        raise InputError(
+            f"fatbin declared size {end} exceeds container length {len(data)}"
+        )
+    entry_count = 0
+    while off + 12 <= end:
+        entry_count += 1
+        if entry_count > MAX_FATBIN_ENTRIES:
+            raise InputError(
+                f"fatbin has more than {MAX_FATBIN_ENTRIES} entries"
+            )
         kind, ever, ehsize, esize = struct.unpack_from("<HHII", data, off)
         if ehsize < 56 or off + ehsize + esize > len(data):
             # last entry may be padded to 8; allow exact end
@@ -161,6 +204,11 @@ def parse(data: bytes, strict: bool = False) -> Fatbin:
         payload = data[off + ehsize: off + ehsize + esize]
         compressed = bool(flags & FLAG_COMPRESS) and kind == KIND_PTX and comp_size > 0
         if compressed:
+            if comp_size > esize:
+                raise InputError(
+                    f"fatbin entry at 0x{off:x}: compressed size {comp_size} "
+                    f"exceeds payload size {esize}"
+                )
             # compressed stream lives in the first comp_size bytes (rest is pad)
             plain = _decompress(payload[:comp_size], deco_size)
             # byte-exact check vs NVIDIA uncompressed payload happens in tests;
@@ -179,6 +227,10 @@ def parse(data: bytes, strict: bool = False) -> Fatbin:
             decompressed_size=deco_size, payload=payload, name=name,
             offset=off, compressed=compressed))
         off += ehsize + esize
+    if off != end:
+        raise InputError(
+            f"fatbin entries do not tile declared size: stopped at {off}, end {end}"
+        )
     return fb
 
 
