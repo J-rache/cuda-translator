@@ -6,6 +6,7 @@ Every test is grounded in real NVIDIA artifacts in examples/artifacts
 from __future__ import annotations
 
 import base64
+import io
 import json
 import os
 import struct
@@ -18,7 +19,10 @@ sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(HERE / "scripts"))
 
 from cuda_translator import (  # noqa: E402
-    fatbin, elf, pe, ptx, interpreter, pipeline, opencl_runner,
+    fatbin, elf, pe, ptx, interpreter, pipeline, opencl_runner, rest, mcp_server,
+)
+from cuda_translator._meta import (  # noqa: E402
+    InputError, MAX_INPUT_BYTES, MAX_DECOMPRESSED_ENTRY_BYTES,
 )
 from cuda_translator.ir import reachable_unsupported  # noqa: E402
 from cuda_translator.opencl import emit_program, emit_kernel, TranslationAbort  # noqa: E402
@@ -316,6 +320,73 @@ class TestBackendSemantics(unittest.TestCase):
         with self.assertRaises(TranslationAbort):
             emit_kernel(hist)
 
+
+    def test_approx_transcendental_reaches_backend_fail_closed(self):
+        source_ptx = r"""
+.version 7.8
+.target sm_52
+.address_size 64
+.visible .entry approx_test()
+{
+    .reg .f32 %f<3>;
+    sin.approx.f32 %f2, %f1;
+    ret;
+}
+"""
+        kernel = ptx.parse_ptx(source_ptx).kernels[0]
+        self.assertEqual(reachable_unsupported(kernel), [])
+        with self.assertRaisesRegex(
+            TranslationAbort, r"opcode sin_approx has no lowering"
+        ):
+            emit_kernel(kernel)
+
+    def test_unknown_branch_label_fails_closed(self):
+        source_ptx = r"""
+.version 7.8
+.target sm_52
+.address_size 64
+.visible .entry branch_test()
+{
+    bra MISSING;
+    ret;
+}
+"""
+        kernel = ptx.parse_ptx(source_ptx).kernels[0]
+        with self.assertRaisesRegex(TranslationAbort, r"unknown label"):
+            emit_kernel(kernel)
+
+    def test_nonzero_barrier_shape_fails_closed(self):
+        source_ptx = r"""
+.version 7.8
+.target sm_52
+.address_size 64
+.visible .entry barrier_shape()
+{
+    bar.sync 1;
+    ret;
+}
+"""
+        kernel = ptx.parse_ptx(source_ptx).kernels[0]
+        with self.assertRaisesRegex(TranslationAbort, r"only bar.sync 0"):
+            emit_kernel(kernel)
+
+    def test_unresolved_global_pointer_fails_closed(self):
+        source_ptx = r"""
+.version 7.8
+.target sm_52
+.address_size 64
+.visible .entry unresolved_ptr()
+{
+    .reg .b64 %rd<2>;
+    .reg .b32 %r<2>;
+    ld.global.u32 %r1, [%rd1];
+    ret;
+}
+"""
+        kernel = ptx.parse_ptx(source_ptx).kernels[0]
+        with self.assertRaises(TranslationAbort):
+            emit_kernel(kernel)
+
     def test_bin_classify_data_dependent_cfg_in_subset(self):
         hres = ptx.parse_ptx(rt("histogram_sm75.ptx"))
         bc = [k for k in hres.kernels if k.name == "bin_classify"][0]
@@ -531,6 +602,36 @@ class TestPipeline(unittest.TestCase):
         rep = pipeline.analyze_input(rb("vector_add_host.exe"))
         self.assertEqual(rep["kind"], "pe")
         self.assertTrue(any(f["size"] == 4928 for f in rep["embedded_fatbins"]))
+
+
+class TestBoundedInputs(unittest.TestCase):
+    def test_fatbin_rejects_declared_decompression_bomb(self):
+        data = bytearray(rb("vector_add_sm75.fatbin"))
+        parsed = fatbin.parse(bytes(data))
+        entry = next(e for e in parsed.entries if e.compressed)
+        struct.pack_into(
+            "<Q", data, entry.offset + 56, MAX_DECOMPRESSED_ENTRY_BYTES + 1
+        )
+        with self.assertRaisesRegex(InputError, r"decompressed size"):
+            fatbin.parse(bytes(data))
+
+    def test_rest_rejects_oversized_content_length_before_read(self):
+        handler = object.__new__(rest._Handler)
+        handler.headers = {
+            "Content-Length": str(MAX_INPUT_BYTES + 1),
+        }
+        handler.rfile = io.BytesIO(b"")
+        with self.assertRaisesRegex(InputError, r"request body too large"):
+            handler._read_body()
+
+    def test_mcp_rejects_malformed_base64(self):
+        with self.assertRaisesRegex(InputError, r"not valid base64"):
+            mcp_server._tool_call("analyze", {"input_b64": "%%%not-base64%%%"})
+
+    def test_sass_only_cubin_is_not_translatable(self):
+        with self.assertRaisesRegex(InputError, r"not translatable"):
+            pipeline.translate_input(rb("vector_add_sm75.cubin"))
+
 
 
 class TestPackaging(unittest.TestCase):

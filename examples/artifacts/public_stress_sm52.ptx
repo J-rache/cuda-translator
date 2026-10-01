@@ -1,0 +1,89 @@
+.version 7.8
+.target sm_52
+.address_size 64
+
+.extern .shared .align 8 .b8 __public_stress_smem[];
+
+.visible .entry public_stress(
+    .param .u64 p_in_f32,
+    .param .u64 p_in_i8,
+    .param .u64 p_in_i16,
+    .param .u64 p_out_f32,
+    .param .u64 p_out_f64,
+    .param .u64 p_out_i32,
+    .param .u32 p_n
+)
+{
+    .reg .pred %p<4>;
+    .reg .b16 %rs<4>;
+    .reg .b32 %r<16>;
+    .reg .b64 %rd<40>;
+    .reg .f32 %f<8>;
+    .reg .f64 %fd<4>;
+
+    ld.param.u64 %rd1, [p_in_f32];
+    ld.param.u64 %rd2, [p_in_i8];
+    ld.param.u64 %rd3, [p_in_i16];
+    ld.param.u64 %rd4, [p_out_f32];
+    ld.param.u64 %rd5, [p_out_f64];
+    ld.param.u64 %rd6, [p_out_i32];
+    ld.param.u32 %r1, [p_n];
+
+    cvta.to.global.u64 %rd7, %rd1;
+    cvta.to.global.u64 %rd8, %rd2;
+    cvta.to.global.u64 %rd9, %rd3;
+    cvta.to.global.u64 %rd10, %rd4;
+    cvta.to.global.u64 %rd11, %rd5;
+    cvta.to.global.u64 %rd12, %rd6;
+
+    mov.u32 %r2, %tid.x;
+    mov.u32 %r3, %ctaid.x;
+    mov.u32 %r4, %ntid.x;
+    mad.lo.u32 %r5, %r3, %r4, %r2;
+    setp.ge.u32 %p1, %r5, %r1;
+    @%p1 bra $DONE;
+
+    mul.wide.u32 %rd13, %r5, 4;
+    add.s64 %rd14, %rd7, %rd13;
+    add.s64 %rd15, %rd10, %rd13;
+    add.s64 %rd16, %rd12, %rd13;
+
+    ld.global.f32 %f1, [%rd14];
+    fma.rn.f32 %f2, %f1, 0f40000000, 0f3f800000;
+
+    mul.wide.u32 %rd17, %r5, 1;
+    add.s64 %rd18, %rd8, %rd17;
+    ld.global.s8 %rs1, [%rd18];
+
+    mul.wide.u32 %rd19, %r5, 2;
+    add.s64 %rd20, %rd9, %rd19;
+    ld.global.s16 %rs2, [%rd20];
+
+    cvt.s32.s8 %r6, %rs1;
+    cvt.s32.s16 %r7, %rs2;
+    add.s32 %r8, %r6, %r7;
+    st.global.s32 [%rd16], %r8;
+
+    mul.wide.u32 %rd21, %r5, 8;
+    add.s64 %rd22, %rd11, %rd21;
+    cvt.rn.f64.f32 %fd1, %f2;
+    div.rn.f64 %fd2, %fd1, 0d4000000000000000;
+    st.global.f64 [%rd22], %fd2;
+
+    mul.wide.u32 %rd23, %r2, 4;
+    st.shared.f32 [%rd23], %f2;
+    bar.sync 0;
+    ld.shared.f32 %f3, [%rd23];
+
+    mov.u32 %r9, 0;
+    mov.f32 %f4, 0f00000000;
+$LOOP:
+    add.f32 %f4, %f4, %f3;
+    add.u32 %r9, %r9, 1;
+    setp.lt.u32 %p2, %r9, 3;
+    @%p2 bra $LOOP;
+
+    st.global.f32 [%rd15], %f4;
+$DONE:
+    ret;
+}

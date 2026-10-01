@@ -14,6 +14,11 @@ launches it. The translation pipeline is fail-closed for unsupported semantics,
 but that is a correctness property, not a sandbox. GPU compilation/execution
 can consume substantial CPU, memory, driver, or GPU resources.
 
+The public parser/API path rejects artifacts or request bodies above 64 MiB.
+Compressed fatbin entries are capped at 64 MiB decompressed size, malformed
+length/back-reference structures fail closed, and fatbin entry count is
+bounded. These are resource-exhaustion guards, not a security sandbox.
+
 For security-sensitive use, run the translator with least privilege and isolate
 it from secrets and unrelated writable data. Keep GPU/OpenCL drivers current.
 

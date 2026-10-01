@@ -14,12 +14,15 @@ Binary payloads use base64 (MCP tools exchange JSON).
 from __future__ import annotations
 
 import base64
+import binascii
 import json
 import sys
 from typing import Any, Dict
 
 from ._meta import VERSION, SERVER_NAME, MCP_PROTOCOL_VERSION
-from ._meta import InputError, TranslationError
+from ._meta import (
+    InputError, TranslationError, MAX_INPUT_BYTES, ensure_input_size,
+)
 
 TOOLS = [
     {
@@ -74,6 +77,31 @@ TOOLS = [
 ]
 
 
+def _decode_input_b64(args: Dict[str, Any]) -> bytes:
+    value = args.get("input_b64")
+    if not isinstance(value, str):
+        raise InputError("input_b64 must be a base64 string")
+    max_b64_chars = ((MAX_INPUT_BYTES + 2) // 3) * 4
+    if len(value) > max_b64_chars:
+        raise InputError(
+            f"input_b64 too large: encoded payload exceeds "
+            f"{MAX_INPUT_BYTES}-byte decoded limit"
+        )
+    try:
+        data = base64.b64decode(value, validate=True)
+    except (binascii.Error, ValueError):
+        raise InputError("input_b64 is not valid base64") from None
+    return ensure_input_size(data, "MCP artifact")
+
+
+def _bounded_ptx_arg(args: Dict[str, Any]) -> str:
+    value = args.get("ptx")
+    if not isinstance(value, str):
+        raise InputError("ptx must be a string")
+    ensure_input_size(value.encode("utf-8"), "MCP PTX")
+    return value
+
+
 def _tool_call(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
     if name == "health":
         from . import opencl_runner
@@ -94,16 +122,16 @@ def _tool_call(name: str, args: Dict[str, Any]) -> Dict[str, Any]:
                 "platform": info.platform, "device": info.device,
                 "driver": info.driver, "compute_units": info.compute_units}
     if name == "analyze":
-        data = base64.b64decode(args["input_b64"])
+        data = _decode_input_b64(args)
         from .pipeline import analyze_input
         return analyze_input(data, "mcp-upload")
     if name == "translate":
-        data = base64.b64decode(args["input_b64"])
+        data = _decode_input_b64(args)
         from .pipeline import translate_input_strict
         return translate_input_strict(data, "mcp-upload")
     if name == "translate_text":
         from .pipeline import translate_ptx_text_strict
-        return translate_ptx_text_strict(args["ptx"], "mcp.ptx")
+        return translate_ptx_text_strict(_bounded_ptx_arg(args), "mcp.ptx")
     if name == "verify_numeric":
         from .verify import run_verification
         return run_verification()

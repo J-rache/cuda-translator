@@ -46,10 +46,10 @@ def _kernel_output_filename(name: str) -> str:
 
 
 def cmd_translate(args) -> int:
-    from .pipeline import translate_input
+    from .pipeline import translate_input_strict
     data = _read(args.file)
     try:
-        result = translate_input(data, os.path.basename(args.file))
+        result = translate_input_strict(data, os.path.basename(args.file))
     except (InputError, TranslationError) as e:
         print(json.dumps({"error": str(e)}, indent=2))
         return 2

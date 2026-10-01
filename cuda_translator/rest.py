@@ -16,7 +16,9 @@ import json
 import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from ._meta import VERSION, InputError, TranslationError, SERVER_NAME
+from ._meta import (
+    VERSION, InputError, TranslationError, SERVER_NAME, MAX_INPUT_BYTES,
+)
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -32,10 +34,24 @@ class _Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _read_body(self) -> bytes:
-        length = int(self.headers.get("Content-Length") or 0)
+        raw_length = self.headers.get("Content-Length") or "0"
+        try:
+            length = int(raw_length)
+        except (TypeError, ValueError):
+            raise InputError("invalid Content-Length") from None
         if length <= 0:
             raise InputError("empty request body")
-        return self.rfile.read(length)
+        if length > MAX_INPUT_BYTES:
+            raise InputError(
+                f"request body too large: {length} bytes exceeds "
+                f"{MAX_INPUT_BYTES}-byte limit"
+            )
+        body = self.rfile.read(length)
+        if len(body) != length:
+            raise InputError(
+                f"truncated request body: expected {length} bytes, got {len(body)}"
+            )
+        return body
 
     def log_message(self, fmt, *args):  # quiet by default
         pass
